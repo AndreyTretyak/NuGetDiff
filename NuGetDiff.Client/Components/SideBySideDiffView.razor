@@ -1,0 +1,213 @@
+@using NuGetDiff.Client.Models
+
+<div class="diff-header mb-3">
+    <h5>@Path.GetFileName(FileDiff.FileName)</h5>
+    <span class="badge @GetDiffBadgeClass()">@FileDiff.Type</span>
+</div>
+
+@if (FileDiff.Type == DiffType.Added)
+{
+    <div class="diff-container">
+        <div class="diff-pane diff-empty">
+            <div class="diff-pane-header">Old Version</div>
+            <div class="diff-content">
+                <p class="text-muted text-center mt-5">File does not exist in old version</p>
+            </div>
+        </div>
+        <div class="diff-pane">
+            <div class="diff-pane-header">New Version</div>
+            <div class="diff-content">
+                <pre><code>@FileDiff.NewContent</code></pre>
+            </div>
+        </div>
+    </div>
+}
+else if (FileDiff.Type == DiffType.Removed)
+{
+    <div class="diff-container">
+        <div class="diff-pane">
+            <div class="diff-pane-header">Old Version</div>
+            <div class="diff-content">
+                <pre><code>@FileDiff.OldContent</code></pre>
+            </div>
+        </div>
+        <div class="diff-pane diff-empty">
+            <div class="diff-pane-header">New Version</div>
+            <div class="diff-content">
+                <p class="text-muted text-center mt-5">File does not exist in new version</p>
+            </div>
+        </div>
+    </div>
+}
+else if (FileDiff.Type == DiffType.Modified)
+{
+    <div class="diff-container">
+        <div class="diff-pane">
+            <div class="diff-pane-header">Old Version</div>
+            <div class="diff-content">
+                @if (FileDiff.Lines.Any())
+                {
+                    <table class="diff-table">
+                        @foreach (var line in GetOldLines())
+                        {
+                            <tr class="@GetLineClass(line)">
+                                <td class="line-number">@line.OldLineNumber</td>
+                                <td class="line-content"><pre>@line.Text</pre></td>
+                            </tr>
+                        }
+                    </table>
+                }
+                else
+                {
+                    <pre><code>@FileDiff.OldContent</code></pre>
+                }
+            </div>
+        </div>
+        <div class="diff-pane">
+            <div class="diff-pane-header">New Version</div>
+            <div class="diff-content">
+                @if (FileDiff.Lines.Any())
+                {
+                    <table class="diff-table">
+                        @foreach (var line in GetNewLines())
+                        {
+                            <tr class="@GetLineClass(line)">
+                                <td class="line-number">@line.NewLineNumber</td>
+                                <td class="line-content"><pre>@line.Text</pre></td>
+                            </tr>
+                        }
+                    </table>
+                }
+                else
+                {
+                    <pre><code>@FileDiff.NewContent</code></pre>
+                }
+            </div>
+        </div>
+    </div>
+}
+else
+{
+    <div class="diff-container">
+        <div class="diff-pane">
+            <div class="diff-pane-header">Content (Unchanged)</div>
+            <div class="diff-content">
+                <pre><code>@(FileDiff.OldContent ?? FileDiff.NewContent)</code></pre>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public FileDiff FileDiff { get; set; } = new();
+
+    private string GetDiffBadgeClass() => FileDiff.Type switch
+    {
+        DiffType.Added => "bg-success",
+        DiffType.Removed => "bg-danger",
+        DiffType.Modified => "bg-warning",
+        _ => "bg-secondary"
+    };
+
+    private string GetLineClass(DiffLine line) => line.Type switch
+    {
+        DiffLineType.Inserted => "line-added",
+        DiffLineType.Deleted => "line-removed",
+        _ => "line-unchanged"
+    };
+
+    private IEnumerable<DiffLine> GetOldLines()
+    {
+        return FileDiff.Lines.Where(l => l.Type != DiffLineType.Inserted).OrderBy(l => l.OldLineNumber ?? int.MaxValue);
+    }
+
+    private IEnumerable<DiffLine> GetNewLines()
+    {
+        return FileDiff.Lines.Where(l => l.Type != DiffLineType.Deleted).OrderBy(l => l.NewLineNumber ?? int.MaxValue);
+    }
+}
+
+<style>
+    .diff-container {
+        display: flex;
+        gap: 10px;
+        max-height: 600px;
+    }
+
+    .diff-pane {
+        flex: 1;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .diff-pane-header {
+        background-color: #f5f5f5;
+        padding: 10px;
+        font-weight: bold;
+        border-bottom: 1px solid #ddd;
+    }
+
+    .diff-content {
+        overflow: auto;
+        max-height: 550px;
+        background-color: #fff;
+    }
+
+    .diff-empty {
+        background-color: #f9f9f9;
+    }
+
+    .diff-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: monospace;
+        font-size: 13px;
+    }
+
+    .line-number {
+        width: 50px;
+        padding: 0 10px;
+        text-align: right;
+        background-color: #f5f5f5;
+        color: #666;
+        border-right: 1px solid #ddd;
+        user-select: none;
+    }
+
+    .line-content {
+        padding: 0 10px;
+    }
+
+    .line-content pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    .line-added {
+        background-color: #e6ffed;
+    }
+
+    .line-removed {
+        background-color: #ffeef0;
+    }
+
+    .line-unchanged {
+        background-color: #fff;
+    }
+
+    pre {
+        margin: 0;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    code {
+        background-color: transparent;
+        padding: 0;
+    }
+</style>

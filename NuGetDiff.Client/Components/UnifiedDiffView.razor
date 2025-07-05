@@ -1,0 +1,281 @@
+@using NuGetDiff.Client.Models
+
+<div class="diff-header mb-3">
+    <h5>@Path.GetFileName(FileDiff.FileName)</h5>
+    <span class="badge @GetDiffBadgeClass()">@FileDiff.Type</span>
+</div>
+
+<div class="unified-diff">
+    @if (FileDiff.Type == DiffType.Added)
+    {
+        <div class="diff-meta">+++ @FileDiff.FileName (new file)</div>
+        <pre class="diff-content"><code>@FileDiff.NewContent</code></pre>
+    }
+    else if (FileDiff.Type == DiffType.Removed)
+    {
+        <div class="diff-meta">--- @FileDiff.FileName (deleted)</div>
+        <pre class="diff-content"><code>@FileDiff.OldContent</code></pre>
+    }
+    else if (FileDiff.Type == DiffType.Modified)
+    {
+        <div class="diff-meta">
+            <div>--- @FileDiff.FileName (old)</div>
+            <div>+++ @FileDiff.FileName (new)</div>
+        </div>
+        
+        @if (FileDiff.Lines.Any())
+        {
+            <table class="unified-diff-table">
+                @foreach (var group in GetLineGroups())
+                {
+                    @if (group.IsContext)
+                    {
+                        <tr class="line-context">
+                            <td class="line-number">@group.OldStart-@group.OldEnd</td>
+                            <td class="line-number">@group.NewStart-@group.NewEnd</td>
+                            <td class="line-marker"></td>
+                            <td class="line-content">@@ -@group.OldStart,@group.OldCount +@group.NewStart,@group.NewCount @@</td>
+                        </tr>
+                    }
+                    
+                    @foreach (var line in group.Lines)
+                    {
+                        <tr class="@GetLineClass(line)">
+                            <td class="line-number">@line.OldLineNumber</td>
+                            <td class="line-number">@line.NewLineNumber</td>
+                            <td class="line-marker">@GetLineMarker(line)</td>
+                            <td class="line-content"><pre>@line.Text</pre></td>
+                        </tr>
+                    }
+                }
+            </table>
+        }
+        else
+        {
+            <div class="diff-fallback">
+                <div class="diff-pane">
+                    <div class="diff-pane-header">Old Version</div>
+                    <pre><code>@FileDiff.OldContent</code></pre>
+                </div>
+                <div class="diff-pane">
+                    <div class="diff-pane-header">New Version</div>
+                    <pre><code>@FileDiff.NewContent</code></pre>
+                </div>
+            </div>
+        }
+    }
+    else
+    {
+        <div class="diff-meta">@FileDiff.FileName (unchanged)</div>
+        <pre class="diff-content"><code>@(FileDiff.OldContent ?? FileDiff.NewContent)</code></pre>
+    }
+</div>
+
+@code {
+    [Parameter] public FileDiff FileDiff { get; set; } = new();
+
+    private class LineGroup
+    {
+        public List<DiffLine> Lines { get; set; } = new();
+        public bool IsContext { get; set; }
+        public int OldStart { get; set; }
+        public int OldEnd { get; set; }
+        public int NewStart { get; set; }
+        public int NewEnd { get; set; }
+        public int OldCount => OldEnd - OldStart + 1;
+        public int NewCount => NewEnd - NewStart + 1;
+    }
+
+    private IEnumerable<LineGroup> GetLineGroups()
+    {
+        var groups = new List<LineGroup>();
+        var currentGroup = new LineGroup();
+
+        foreach (var line in FileDiff.Lines)
+        {
+            // Start a new group if we're switching between changed and unchanged lines
+            if (currentGroup.Lines.Any() && 
+                ((line.Type == DiffLineType.Unchanged) != (currentGroup.Lines.Last().Type == DiffLineType.Unchanged)))
+            {
+                groups.Add(currentGroup);
+                currentGroup = new LineGroup();
+            }
+
+            currentGroup.Lines.Add(line);
+        }
+
+        if (currentGroup.Lines.Any())
+        {
+            groups.Add(currentGroup);
+        }
+
+        // Mark context groups and calculate line ranges
+        foreach (var group in groups)
+        {
+            group.IsContext = group.Lines.All(l => l.Type == DiffLineType.Unchanged);
+            
+            var oldLines = group.Lines.Where(l => l.OldLineNumber.HasValue).ToList();
+            var newLines = group.Lines.Where(l => l.NewLineNumber.HasValue).ToList();
+            
+            if (oldLines.Any())
+            {
+                group.OldStart = oldLines.Min(l => l.OldLineNumber!.Value);
+                group.OldEnd = oldLines.Max(l => l.OldLineNumber!.Value);
+            }
+            
+            if (newLines.Any())
+            {
+                group.NewStart = newLines.Min(l => l.NewLineNumber!.Value);
+                group.NewEnd = newLines.Max(l => l.NewLineNumber!.Value);
+            }
+        }
+
+        return groups;
+    }
+
+    private string GetDiffBadgeClass() => FileDiff.Type switch
+    {
+        DiffType.Added => "bg-success",
+        DiffType.Removed => "bg-danger",
+        DiffType.Modified => "bg-warning",
+        _ => "bg-secondary"
+    };
+
+    private string GetLineClass(DiffLine line) => line.Type switch
+    {
+        DiffLineType.Inserted => "line-added",
+        DiffLineType.Deleted => "line-removed",
+        _ => "line-unchanged"
+    };
+
+    private string GetLineMarker(DiffLine line) => line.Type switch
+    {
+        DiffLineType.Inserted => "+",
+        DiffLineType.Deleted => "-",
+        _ => " "
+    };
+}
+
+<style>
+    .unified-diff {
+        max-height: 600px;
+        overflow: auto;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        background-color: #fff;
+    }
+
+    .diff-meta {
+        background-color: #f5f5f5;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 13px;
+        border-bottom: 1px solid #ddd;
+    }
+
+    .unified-diff-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: monospace;
+        font-size: 13px;
+    }
+
+    .line-number {
+        width: 50px;
+        padding: 0 5px;
+        text-align: right;
+        background-color: #f5f5f5;
+        color: #666;
+        border-right: 1px solid #ddd;
+        user-select: none;
+    }
+
+    .line-marker {
+        width: 20px;
+        padding: 0 5px;
+        text-align: center;
+        font-weight: bold;
+        border-right: 1px solid #ddd;
+    }
+
+    .line-content {
+        padding: 0 10px;
+    }
+
+    .line-content pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    .line-added {
+        background-color: #e6ffed;
+    }
+
+    .line-added .line-marker {
+        color: #28a745;
+        background-color: #d4edda;
+    }
+
+    .line-removed {
+        background-color: #ffeef0;
+    }
+
+    .line-removed .line-marker {
+        color: #dc3545;
+        background-color: #f8d7da;
+    }
+
+    .line-unchanged {
+        background-color: #fff;
+    }
+
+    .line-context {
+        background-color: #f0f0f0;
+        color: #666;
+    }
+
+    .line-context .line-content {
+        font-style: italic;
+    }
+
+    .diff-content {
+        padding: 10px;
+        margin: 0;
+        font-family: monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    .diff-fallback {
+        display: flex;
+        gap: 10px;
+        padding: 10px;
+    }
+
+    .diff-fallback .diff-pane {
+        flex: 1;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+    }
+
+    .diff-fallback .diff-pane-header {
+        background-color: #f5f5f5;
+        padding: 5px 10px;
+        font-weight: bold;
+        border-bottom: 1px solid #ddd;
+    }
+
+    .diff-fallback pre {
+        margin: 0;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 13px;
+    }
+
+    code {
+        background-color: transparent;
+        padding: 0;
+    }
+</style>

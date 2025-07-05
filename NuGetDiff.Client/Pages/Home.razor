@@ -1,0 +1,196 @@
+﻿@page "/"
+@using NuGetDiff.Client.Models
+@using NuGetDiff.Client.Services
+@using NuGetDiff.Client.Components
+@using Microsoft.AspNetCore.WebUtilities
+@inject NavigationManager Navigation
+@inject NuGetService NuGetService
+@inject DecompilerService DecompilerService
+@inject DiffService DiffService
+
+<PageTitle>NuGet Package Diff</PageTitle>
+
+<div class="container-fluid">
+    <h1>NuGet Package Diff</h1>
+
+    @if (isLoading)
+    {
+        <div class="alert alert-info">
+            <div class="spinner-border spinner-border-sm me-2" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            @loadingMessage
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger">
+            @errorMessage
+        </div>
+    }
+
+    @if (!hasQueryParams)
+    {
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Compare NuGet Package Versions</h5>
+                <EditForm Model="@comparisonRequest" OnValidSubmit="@ComparePackages">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label class="form-label">Package Name</label>
+                                <InputText @bind-Value="comparisonRequest.Name" class="form-control" placeholder="e.g., Newtonsoft.Json" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Old Version</label>
+                                <InputText @bind-Value="comparisonRequest.Version" class="form-control" placeholder="e.g., 13.0.1" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Source (optional)</label>
+                                <InputText @bind-Value="comparisonRequest.Source" class="form-control" />
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label class="form-label">New Package Name (optional)</label>
+                                <InputText @bind-Value="comparisonRequest.NewName" class="form-control" placeholder="Leave empty to use same name" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">New Version</label>
+                                <InputText @bind-Value="comparisonRequest.NewVersion" class="form-control" placeholder="e.g., 13.0.3" />
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">New Source (optional)</label>
+                                <InputText @bind-Value="comparisonRequest.NewSource" class="form-control" placeholder="Leave empty to use same source" />
+                            </div>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary" disabled="@isLoading">Compare Versions</button>
+                </EditForm>
+            </div>
+        </div>
+    }
+
+    @if (diffResult != null)
+    {
+        <div class="card">
+            <div class="card-header">
+                <ul class="nav nav-tabs card-header-tabs" role="tablist">
+                    <li class="nav-item">
+                        <a class="nav-link @(activeView == "tree" ? "active" : "")" href="#" @onclick="@(() => activeView = "tree")" @onclick:preventDefault="true">
+                            File Tree
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link @(activeView == "side-by-side" ? "active" : "")" href="#" @onclick="@(() => activeView = "side-by-side")" @onclick:preventDefault="true">
+                            Side-by-Side
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link @(activeView == "unified" ? "active" : "")" href="#" @onclick="@(() => activeView = "unified")" @onclick:preventDefault="true">
+                            Unified
+                        </a>
+                    </li>
+                </ul>
+            </div>
+            <div class="card-body">
+                @if (activeView == "tree")
+                {
+                    <FileTreeView DiffResult="@diffResult" OnFileSelected="@SelectFile" />
+                }
+                else if (activeView == "side-by-side" && selectedFile != null)
+                {
+                    <SideBySideDiffView FileDiff="@selectedFile" />
+                }
+                else if (activeView == "unified" && selectedFile != null)
+                {
+                    <UnifiedDiffView FileDiff="@selectedFile" />
+                }
+                else if (activeView != "tree")
+                {
+                    <p class="text-muted">Select a file from the File Tree view to see the diff.</p>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private PackageComparisonRequest comparisonRequest = new();
+    private DiffResult? diffResult;
+    private FileDiff? selectedFile;
+    private string activeView = "tree";
+    private bool isLoading = false;
+    private string loadingMessage = "";
+    private string? errorMessage;
+    private bool hasQueryParams = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var uri = Navigation.ToAbsoluteUri(Navigation.Uri);
+        if (QueryHelpers.ParseQuery(uri.Query).Count > 0)
+        {
+            hasQueryParams = true;
+            comparisonRequest = PackageComparisonRequest.FromQueryString(uri.Query);
+            await ComparePackages();
+        }
+    }
+
+    private async Task ComparePackages()
+    {
+        try
+        {
+            isLoading = true;
+            errorMessage = null;
+            diffResult = null;
+            selectedFile = null;
+
+            // Set defaults for optional fields
+            var newName = string.IsNullOrEmpty(comparisonRequest.NewName) ? comparisonRequest.Name : comparisonRequest.NewName;
+            var newSource = string.IsNullOrEmpty(comparisonRequest.NewSource) ? comparisonRequest.Source : comparisonRequest.NewSource;
+
+            // Download old package
+            loadingMessage = $"Downloading {comparisonRequest.Name} {comparisonRequest.Version}...";
+            StateHasChanged();
+            var oldPackage = await NuGetService.DownloadPackageAsync(comparisonRequest.Name, comparisonRequest.Version, comparisonRequest.Source);
+
+            // Download new package
+            loadingMessage = $"Downloading {newName} {comparisonRequest.NewVersion}...";
+            StateHasChanged();
+            var newPackage = await NuGetService.DownloadPackageAsync(newName, comparisonRequest.NewVersion, newSource);
+
+            // Decompile assemblies
+            loadingMessage = "Decompiling assemblies...";
+            StateHasChanged();
+            oldPackage = await DecompilerService.DecompileAssembliesAsync(oldPackage);
+            newPackage = await DecompilerService.DecompileAssembliesAsync(newPackage);
+
+            // Compare packages
+            loadingMessage = "Comparing packages...";
+            StateHasChanged();
+            diffResult = DiffService.ComparePackages(oldPackage, newPackage);
+
+            // Select first modified file by default
+            selectedFile = diffResult.FileDiffs.FirstOrDefault(f => f.Type == DiffType.Modified);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+            loadingMessage = "";
+        }
+    }
+
+    private void SelectFile(FileDiff file)
+    {
+        selectedFile = file;
+        if (activeView == "tree")
+        {
+            activeView = "side-by-side";
+        }
+    }
+}

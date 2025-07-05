@@ -1,0 +1,105 @@
+@using NuGetDiff.Client.Models
+
+<div class="file-tree">
+    <h5>File Changes Summary</h5>
+    <div class="mb-3">
+        <span class="badge bg-success">@addedCount Added</span>
+        <span class="badge bg-danger">@removedCount Removed</span>
+        <span class="badge bg-warning">@modifiedCount Modified</span>
+        <span class="badge bg-secondary">@unchangedCount Unchanged</span>
+    </div>
+    
+    <div class="file-list">
+        @foreach (var group in groupedFiles)
+        {
+            <div class="file-group mb-3">
+                <h6 class="text-muted">@group.Key</h6>
+                @foreach (var file in group.Value)
+                {
+                    <div class="file-item @GetFileClass(file.Type) p-2 mb-1" @onclick="() => OnFileSelected.InvokeAsync(file)">
+                        <span class="file-icon me-2">@GetFileIcon(file.Type)</span>
+                        <span class="file-name">@Path.GetFileName(file.FileName)</span>
+                        <span class="file-badge float-end">@GetFileBadge(file.Type)</span>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public DiffResult DiffResult { get; set; } = new();
+    [Parameter] public EventCallback<FileDiff> OnFileSelected { get; set; }
+
+    private int addedCount => DiffResult.FileDiffs.Count(f => f.Type == DiffType.Added);
+    private int removedCount => DiffResult.FileDiffs.Count(f => f.Type == DiffType.Removed);
+    private int modifiedCount => DiffResult.FileDiffs.Count(f => f.Type == DiffType.Modified);
+    private int unchangedCount => DiffResult.FileDiffs.Count(f => f.Type == DiffType.Unchanged);
+
+    private Dictionary<string, List<FileDiff>> groupedFiles => DiffResult.FileDiffs
+        .GroupBy(f => Path.GetDirectoryName(f.FileName) ?? "")
+        .ToDictionary(g => g.Key, g => g.OrderBy(f => f.FileName).ToList());
+
+    private string GetFileClass(DiffType type) => type switch
+    {
+        DiffType.Added => "file-added",
+        DiffType.Removed => "file-removed",
+        DiffType.Modified => "file-modified",
+        _ => "file-unchanged"
+    };
+
+    private string GetFileIcon(DiffType type) => type switch
+    {
+        DiffType.Added => "+",
+        DiffType.Removed => "-",
+        DiffType.Modified => "~",
+        _ => "="
+    };
+
+    private string GetFileBadge(DiffType type) => type switch
+    {
+        DiffType.Added => "Added",
+        DiffType.Removed => "Removed",
+        DiffType.Modified => "Modified",
+        _ => "Unchanged"
+    };
+}
+
+<style>
+    .file-tree {
+        max-height: 600px;
+        overflow-y: auto;
+    }
+
+    .file-item {
+        cursor: pointer;
+        border-radius: 4px;
+        transition: background-color 0.2s;
+    }
+
+    .file-item:hover {
+        background-color: rgba(0, 0, 0, 0.05);
+    }
+
+    .file-added {
+        border-left: 3px solid #28a745;
+    }
+
+    .file-removed {
+        border-left: 3px solid #dc3545;
+    }
+
+    .file-modified {
+        border-left: 3px solid #ffc107;
+    }
+
+    .file-unchanged {
+        border-left: 3px solid #6c757d;
+        opacity: 0.7;
+    }
+
+    .file-icon {
+        font-weight: bold;
+        font-family: monospace;
+    }
+</style>
