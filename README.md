@@ -27,8 +27,9 @@ characters like `#`, `+` and `%` round‑trip correctly.
 ```
 NuGetDiff.slnx
 ├── src/
-│   ├── NuGetDiff.Core/   # Pure managed library: package reader, decompiler, differ
-│   └── NuGetDiff.Web/    # Blazor WebAssembly app
+│   ├── NuGetDiff.Core/    # Pure managed library: package reader, decompiler, differ
+│   ├── NuGetDiff.Web/     # Blazor WebAssembly client (the actual UI)
+│   └── NuGetDiff.Server/  # ASP.NET Core host that serves the WASM client
 └── tests/
     └── NuGetDiff.Core.Tests/  # xUnit
 ```
@@ -39,26 +40,35 @@ package access is via streams; ILSpy's decompiler is wrapped with a custom
 in‑memory `IAssemblyResolver` that resolves sibling assemblies inside the
 package without touching disk.
 
+`NuGetDiff.Server` is a minimal ASP.NET Core process whose only job is to
+serve the WASM client with a SPA fallback that handles dotted URL segments
+(e.g. `Newtonsoft.Json` and `13.0.1`) which the default Blazor WASM dev
+server treats as static‑file requests and 404s.
+
 ## Building and testing
 
 ```pwsh
 dotnet build NuGetDiff.slnx
-dotnet test NuGetDiff.slnx
-dotnet run --project src/NuGetDiff.Web
+dotnet test  NuGetDiff.slnx
+dotnet run   --project src/NuGetDiff.Server
 ```
 
-The dev server listens on the URL printed by Kestrel (default
-`http://localhost:5174` per `launchSettings.json`).
+The host listens on `http://localhost:5180` (see `launchSettings.json`).
 
-To produce a static deployable site:
+To produce a deployable artifact:
 
 ```pwsh
-dotnet publish src/NuGetDiff.Web -c Release
+dotnet publish src/NuGetDiff.Server -c Release
 ```
 
-The output under `bin/Release/net8.0/publish/wwwroot` can be served by any
-static host (GitHub Pages, S3, etc.). Source maps and the service‑worker
-manifest are emitted by the standard Blazor PWA template.
+The output under `bin/Release/net8.0/publish/` is a self‑contained ASP.NET
+Core app that hosts the WASM client. To deploy to a pure static host
+(GitHub Pages, S3, etc.) you can publish only the WASM client
+(`dotnet publish src/NuGetDiff.Web -c Release`) and serve
+`bin/Release/net8.0/publish/wwwroot/` — but the host **must** be configured
+to fall back to `index.html` for unknown paths, including those with dots,
+or routes like `/Newtonsoft.Json/13.0.1` will 404. On GitHub Pages the
+standard `404.html` redirect trick is the usual answer.
 
 ## Offline use
 

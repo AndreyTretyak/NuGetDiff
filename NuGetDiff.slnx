@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/NuGetDiff.Core/NuGetDiff.Core.csproj" />
     <Project Path="src/NuGetDiff.Web/NuGetDiff.Web.csproj" />
+    <Project Path="src/NuGetDiff.Server/NuGetDiff.Server.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NuGetDiff.Core.Tests/NuGetDiff.Core.Tests.csproj" />
