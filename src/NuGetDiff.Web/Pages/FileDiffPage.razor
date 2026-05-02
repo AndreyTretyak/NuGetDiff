@@ -7,6 +7,7 @@
 @inherits CancellablePageBase
 @inject PackageResolver Resolver
 @inject BusyState Busy
+@inject NavigationManager Nav
 
 <PageTitle>@Path — @Id @V1 → @V2</PageTitle>
 
@@ -17,53 +18,73 @@
     <strong>@Path</strong>
 </nav>
 
-<h1>@System.IO.Path.GetFileName(Path)</h1>
-<p class="muted">@Path · @Id @V1 → @V2</p>
+<div class="file-layout">
+    <aside class="file-sidebar">
+        <h2 class="sidebar-title">Changed files</h2>
+        @if (_tree is not null)
+        {
+            <FileTree Node="_tree" OnFileClick="OnFileClick" SelectedPath="@Path" />
+        }
+        else if (_error is not null)
+        {
+            <p class="muted">No tree available.</p>
+        }
+        else
+        {
+            <p class="muted">Loading tree…</p>
+        }
+    </aside>
 
-@if (_error is not null)
-{
-    <p class="error">@_error</p>
-}
-else if (_loading)
-{
-    <p>Computing diff…</p>
-}
-else if (_diff is null)
-{
-    <p class="muted">Nothing to show.</p>
-}
-else
-{
-    if (!string.IsNullOrWhiteSpace(_diff.Message))
-    {
-        <p class="muted">@_diff.Message</p>
-    }
-    switch (_diff.Kind)
-    {
-        case FileDiffKind.Text:
-        case FileDiffKind.Assembly:
-            if (_diff.Text is not null)
+    <section class="file-content">
+        <h1>@System.IO.Path.GetFileName(Path)</h1>
+        <p class="muted">@Path · @Id @V1 → @V2</p>
+
+        @if (_error is not null)
+        {
+            <p class="error">@_error</p>
+        }
+        else if (_loading)
+        {
+            <p>Computing diff…</p>
+        }
+        else if (_diff is null)
+        {
+            <p class="muted">Nothing to show.</p>
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(_diff.Message))
             {
-                <DiffView Diff="_diff.Text" />
+                <p class="muted">@_diff.Message</p>
             }
-            else
+            switch (_diff.Kind)
             {
-                <p class="muted">No textual diff available.</p>
+                case FileDiffKind.Text:
+                case FileDiffKind.Assembly:
+                    if (_diff.Text is not null)
+                    {
+                        <DiffView Diff="_diff.Text" />
+                    }
+                    else
+                    {
+                        <p class="muted">No textual diff available.</p>
+                    }
+                    break;
+                case FileDiffKind.Binary:
+                    <dl class="meta-grid">
+                        <dt>Old size</dt><dd>@(_diff.OldLength?.ToString() ?? "—") bytes</dd>
+                        <dt>New size</dt><dd>@(_diff.NewLength?.ToString() ?? "—") bytes</dd>
+                        <dt>Old SHA256</dt><dd><code>@(_diff.OldHash ?? "—")</code></dd>
+                        <dt>New SHA256</dt><dd><code>@(_diff.NewHash ?? "—")</code></dd>
+                    </dl>
+                    break;
+                default:
+                    <p class="muted">Unsupported file kind.</p>
+                    break;
             }
-            break;
-        case FileDiffKind.Binary:
-            <dl class="meta-grid">
-                <dt>Old size</dt><dd>@(_diff.OldLength?.ToString() ?? "—") bytes</dd>
-                <dt>New size</dt><dd>@(_diff.NewLength?.ToString() ?? "—") bytes</dd>
-                <dt>Old SHA256</dt><dd><code>@(_diff.OldHash ?? "—")</code></dd>
-                <dt>New SHA256</dt><dd><code>@(_diff.NewHash ?? "—")</code></dd>
-            </dl>
-            break;
-        default:
-            <p class="muted">Unsupported file kind.</p>
-            break;
-    }
-}
+        }
+    </section>
+</div>
 
 @code {
     [Parameter] public string Id { get; set; } = string.Empty;
@@ -72,12 +93,23 @@ else
     [SupplyParameterFromQuery(Name = "path")] public string Path { get; set; } = string.Empty;
 
     private FileDiff? _diff;
+    private FileTreeNode? _tree;
     private string? _error;
     private bool _loading = true;
+
+    // Cache the tree-diff per (id, v1, v2) so re-navigating between files in the
+    // same comparison doesn't redownload and rediff the whole pair every time.
+    private string _treeKey = string.Empty;
 
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
+        var key = $"{Id}|{V1}|{V2}";
+        var keyChanged = !string.Equals(_treeKey, key, StringComparison.OrdinalIgnoreCase);
+        if (keyChanged)
+        {
+            _tree = null;
+        }
         _diff = null;
         _error = null;
         _loading = true;
@@ -101,6 +133,22 @@ else
 
             using var oldR = new PackageReader(s1);
             using var newR = new PackageReader(s2);
+
+            if (keyChanged || _tree is null)
+            {
+                Busy.Update("Computing tree diff…");
+                await Task.Yield();
+                if (ct.IsCancellationRequested) return;
+                var treeDiff = new Differ().DiffTree(oldR, newR);
+                if (ct.IsCancellationRequested) return;
+                var changedOnly = treeDiff.Changes
+                    .Where(c => c.Kind != FileChangeKind.Unchanged)
+                    .ToList();
+                _tree = FileTreeBuilder.BuildFromChanges(changedOnly);
+                _treeKey = key;
+                StateHasChanged();
+            }
+
             Busy.Update($"Computing diff for {Path}…");
             await Task.Yield();
             if (ct.IsCancellationRequested) return;
@@ -121,5 +169,12 @@ else
         {
             if (!ct.IsCancellationRequested) _loading = false;
         }
+    }
+
+    private void OnFileClick(FileTreeNode node)
+    {
+        if (node.IsDirectory) return;
+        var p = Uri.EscapeDataString(node.FullPath);
+        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(V1)}/{Uri.EscapeDataString(V2)}/file?path={p}");
     }
 }

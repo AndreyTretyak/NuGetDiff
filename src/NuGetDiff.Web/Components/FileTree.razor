@@ -10,12 +10,14 @@
             {
                 <details open>
                     <summary><span class="icon">📁</span> @child.Name</summary>
-                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick" />
+                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick" SelectedPath="@SelectedPath" />
                 </details>
             }
             else
             {
-                <a class="file-link @ChangeClass(child)" href="javascript:void(0)" @onclick="@(() => OnFileClick.InvokeAsync(child))">
+                <a class="file-link @ChangeClass(child) @(IsSelected(child) ? "selected" : string.Empty)"
+                   href="javascript:void(0)"
+                   @onclick="@(() => OnFileClick.InvokeAsync(child))">
                     <span class="icon">@KindIcon(child)</span>
                     <span class="name">@child.Name</span>
                     @if (child.Change is { Kind: var ck } && ck != FileChangeKind.Unchanged)
@@ -32,6 +34,12 @@
     [Parameter, EditorRequired] public FileTreeNode Node { get; set; } = default!;
     [Parameter] public bool Root { get; set; } = true;
     [Parameter] public EventCallback<FileTreeNode> OnFileClick { get; set; }
+    [Parameter] public string? SelectedPath { get; set; }
+
+    private bool IsSelected(FileTreeNode node)
+        => !node.IsDirectory
+           && !string.IsNullOrEmpty(SelectedPath)
+           && string.Equals(node.FullPath, SelectedPath, StringComparison.OrdinalIgnoreCase);
 
     private static string KindIcon(FileTreeNode node) => node.Entry?.Kind switch
     {

@@ -228,6 +228,43 @@ h3 { font-size: 1.05rem; }
 .file-link.change-removed { color: var(--color-removed-fg); }
 .file-link.change-modified { color: var(--color-modified-fg); }
 .file-link.change-renamed { color: var(--color-renamed-fg); }
+.file-link.selected {
+    background: var(--color-link-bg, rgba(9, 105, 218, 0.12));
+    outline: 1px solid var(--color-link, #0969da);
+}
+.file-link.selected .name { font-weight: 600; }
+
+.file-layout {
+    display: grid;
+    grid-template-columns: minmax(220px, 320px) 1fr;
+    gap: 1.25rem;
+    align-items: start;
+}
+.file-sidebar {
+    position: sticky;
+    top: 0.75rem;
+    max-height: calc(100vh - 1.5rem);
+    overflow: auto;
+    padding: 0.6rem 0.75rem;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+.file-sidebar .sidebar-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted, #57606a);
+    margin: 0 0 0.5rem 0;
+}
+.file-content {
+    min-width: 0; /* allow long pre/code to shrink in the grid track */
+}
+@media (max-width: 800px) {
+    .file-layout { grid-template-columns: 1fr; }
+    .file-sidebar { position: static; max-height: 40vh; }
+}
 
 .badge { display: inline-block; min-width: 1.3em; padding: 0 0.35em; border-radius: 999px; font-size: 0.75rem; font-weight: 600; line-height: 1.5; text-align: center; }
 .badge-added { background: var(--color-added-bg); color: var(--color-added-fg); }

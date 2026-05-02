@@ -2,11 +2,13 @@
 @using NuGetDiff.Core.Decompilation
 @using NuGetDiff.Core.Models
 @using NuGetDiff.Core.Packages
+@using NuGetDiff.Web.Components
 @using NuGetDiff.Web.Services
 @inherits CancellablePageBase
 @inject PackageResolver Resolver
 @inject BusyState Busy
 @inject MarkdownRenderer Markdown
+@inject NavigationManager Nav
 
 <PageTitle>@Path — @Id @Version</PageTitle>
 
@@ -17,47 +19,67 @@
     <strong>@Path</strong>
 </nav>
 
-<h1>@System.IO.Path.GetFileName(Path)</h1>
-<p class="muted">@Path · @Id @Version</p>
-
-@if (_error is not null)
-{
-    <p class="error">@_error</p>
-}
-else if (_loading)
-{
-    <p>Loading…</p>
-}
-else if (_kind == FileKind.Markdown && _text is not null)
-{
-    <article class="markdown-body">@((MarkupString)Markdown.ToHtml(_text))</article>
-}
-else if ((_kind == FileKind.Text || _kind == FileKind.Markdown) && _text is not null)
-{
-    <pre class="code-view"><code>@_text</code></pre>
-}
-else if (_kind == FileKind.Assembly)
-{
-    @if (_decompilation is not null)
-    {
-        @if (_decompilation.Warnings.Count > 0)
+<div class="file-layout">
+    <aside class="file-sidebar">
+        <h2 class="sidebar-title">Package contents</h2>
+        @if (_tree is not null)
         {
-            <details class="warnings">
-                <summary>@_decompilation.Warnings.Count warnings</summary>
-                <ul>@foreach (var w in _decompilation.Warnings) { <li>@w</li> }</ul>
-            </details>
+            <FileTree Node="_tree" OnFileClick="OnFileClick" SelectedPath="@Path" />
         }
-        <pre class="code-view"><code class="language-csharp">@_decompilation.CSharp</code></pre>
-    }
-    else if (_decompError is not null)
-    {
-        <p class="error">@_decompError.Message @(_decompError.Detail is null ? "" : "— " + _decompError.Detail)</p>
-    }
-}
-else if (_kind == FileKind.Binary)
-{
-    <p class="muted">Binary file. @_lengthDescription</p>
-}
+        else if (_error is not null)
+        {
+            <p class="muted">No tree available.</p>
+        }
+        else
+        {
+            <p class="muted">Loading tree…</p>
+        }
+    </aside>
+
+    <section class="file-content">
+        <h1>@System.IO.Path.GetFileName(Path)</h1>
+        <p class="muted">@Path · @Id @Version</p>
+
+        @if (_error is not null)
+        {
+            <p class="error">@_error</p>
+        }
+        else if (_loading)
+        {
+            <p>Loading…</p>
+        }
+        else if (_kind == FileKind.Markdown && _text is not null)
+        {
+            <article class="markdown-body">@((MarkupString)Markdown.ToHtml(_text))</article>
+        }
+        else if ((_kind == FileKind.Text || _kind == FileKind.Markdown) && _text is not null)
+        {
+            <pre class="code-view"><code>@_text</code></pre>
+        }
+        else if (_kind == FileKind.Assembly)
+        {
+            @if (_decompilation is not null)
+            {
+                @if (_decompilation.Warnings.Count > 0)
+                {
+                    <details class="warnings">
+                        <summary>@_decompilation.Warnings.Count warnings</summary>
+                        <ul>@foreach (var w in _decompilation.Warnings) { <li>@w</li> }</ul>
+                    </details>
+                }
+                <pre class="code-view"><code class="language-csharp">@_decompilation.CSharp</code></pre>
+            }
+            else if (_decompError is not null)
+            {
+                <p class="error">@_decompError.Message @(_decompError.Detail is null ? "" : "— " + _decompError.Detail)</p>
+            }
+        }
+        else if (_kind == FileKind.Binary)
+        {
+            <p class="muted">Binary file. @_lengthDescription</p>
+        }
+    </section>
+</div>
 
 @code {
     [Parameter] public string Id { get; set; } = string.Empty;
@@ -71,10 +93,21 @@ else if (_kind == FileKind.Binary)
     private DecompilationResult? _decompilation;
     private DecompilationError? _decompError;
     private string? _lengthDescription;
+    private FileTreeNode? _tree;
+
+    // Cache the contents tree per (id, version) so re-navigating between files
+    // in the same package doesn't redownload and reparse it every time.
+    private string _treeKey = string.Empty;
 
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
+        var key = $"{Id}|{Version}";
+        var keyChanged = !string.Equals(_treeKey, key, StringComparison.OrdinalIgnoreCase);
+        if (keyChanged)
+        {
+            _tree = null;
+        }
         Reset();
         StateHasChanged();
         if (string.IsNullOrEmpty(Path))
@@ -91,6 +124,14 @@ else if (_kind == FileKind.Binary)
             if (ct.IsCancellationRequested) return;
             if (stream is null) { _error = $"Could not find {Id} {Version}."; _loading = false; return; }
             using var reader = new PackageReader(stream);
+
+            if (keyChanged || _tree is null)
+            {
+                _tree = FileTreeBuilder.Build(reader.Files);
+                _treeKey = key;
+                StateHasChanged();
+            }
+
             if (!reader.ContainsFile(Path))
             {
                 _error = $"File '{Path}' is not in this package.";
@@ -142,6 +183,13 @@ else if (_kind == FileKind.Binary)
         _decompilation = null;
         _decompError = null;
         _lengthDescription = null;
+    }
+
+    private void OnFileClick(FileTreeNode node)
+    {
+        if (node.IsDirectory) return;
+        var p = Uri.EscapeDataString(node.FullPath);
+        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={p}");
     }
 
     private static string DecodeText(byte[] bytes)
