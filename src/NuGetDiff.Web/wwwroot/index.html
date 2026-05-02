@@ -23,13 +23,58 @@
         <div class="loading-progress-text"></div>
     </div>
 
-    <div id="blazor-error-ui">
-        An unhandled error has occurred.
-        <a href="" class="reload">Reload</a>
-        <a class="dismiss">🗙</a>
+    <div id="blazor-error-ui" role="alert">
+        <p class="error-headline">An unhandled error has occurred.</p>
+        <details>
+            <summary>Show details</summary>
+            <pre id="blazor-error-detail"></pre>
+        </details>
+        <p class="error-actions">
+            <a href="" class="reload">Reload</a>
+            <a class="dismiss" href="javascript:void(0)">Dismiss</a>
+        </p>
     </div>
     <script src="_framework/blazor.webassembly.js"></script>
     <script>
+        (function () {
+            const detailEl = () => document.getElementById('blazor-error-detail');
+            function show(text) {
+                const el = detailEl();
+                if (!el) return;
+                const stamp = new Date().toISOString();
+                const next = `[${stamp}] ${text}\n\n` + (el.textContent || '');
+                el.textContent = next.length > 16000 ? next.slice(0, 16000) + '\n…(truncated)' : next;
+            }
+            window.addEventListener('error', e => {
+                const err = e.error;
+                if (err && (err.stack || err.message)) {
+                    show(err.stack || err.message);
+                } else if (e.message) {
+                    show(`${e.message} (${e.filename}:${e.lineno}:${e.colno})`);
+                }
+            });
+            window.addEventListener('unhandledrejection', e => {
+                const r = e.reason;
+                if (r && (r.stack || r.message)) {
+                    show(r.stack || r.message);
+                } else {
+                    try { show(JSON.stringify(r)); } catch { show(String(r)); }
+                }
+            });
+            // Mirror anything Blazor / dotnet writes via console.error so
+            // unhandled C# exceptions (which Blazor logs there) are visible too.
+            const origError = console.error.bind(console);
+            console.error = function (...args) {
+                try {
+                    show(args.map(a => {
+                        if (a instanceof Error) return a.stack || a.message;
+                        if (typeof a === 'string') return a;
+                        try { return JSON.stringify(a); } catch { return String(a); }
+                    }).join(' '));
+                } catch { /* never let logging break logging */ }
+                origError(...args);
+            };
+        })();
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('service-worker.js').catch(() => { /* ignored */ });
         }

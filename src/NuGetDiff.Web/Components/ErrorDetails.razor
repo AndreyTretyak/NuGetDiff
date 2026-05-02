@@ -1,0 +1,54 @@
+@*
+    Renders a full exception (type, message, stack, inner) for an in-component
+    failure caught by an ErrorBoundary. Exposes a Retry button so the user can
+    re-attempt without a full page reload.
+*@
+
+<div class="error-card" role="alert">
+    <h2>Something went wrong</h2>
+    @if (Exception is not null)
+    {
+        <p class="error-summary">
+            <strong>@Exception.GetType().FullName</strong>: @Exception.Message
+        </p>
+        <details open>
+            <summary>Stack trace</summary>
+            <pre class="error-stack">@FormatExceptionFull(Exception)</pre>
+        </details>
+    }
+    <div class="error-actions">
+        @if (OnRetry.HasDelegate)
+        {
+            <button type="button" class="btn-primary" @onclick="OnRetry">Retry</button>
+        }
+        <a class="btn-secondary" href="/">Go home</a>
+    </div>
+</div>
+
+@code {
+    [Parameter] public Exception? Exception { get; set; }
+    [Parameter] public EventCallback OnRetry { get; set; }
+
+    private static string FormatExceptionFull(Exception ex)
+    {
+        var sb = new System.Text.StringBuilder();
+        var current = ex;
+        var depth = 0;
+        while (current is not null)
+        {
+            if (depth > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"--- inner #{depth} ---");
+            }
+            sb.AppendLine($"{current.GetType().FullName}: {current.Message}");
+            if (!string.IsNullOrEmpty(current.StackTrace))
+            {
+                sb.AppendLine(current.StackTrace);
+            }
+            current = current.InnerException;
+            depth++;
+        }
+        return sb.ToString();
+    }
+}

@@ -308,8 +308,69 @@ h3 { font-size: 1.05rem; }
     width: 100%;
     z-index: 1000;
     color: #1f2328;
+    max-height: 50vh;
+    overflow: auto;
 }
-#blazor-error-ui .dismiss { cursor: pointer; position: absolute; right: 0.75rem; top: 0.5rem; }
+#blazor-error-ui .error-headline { margin: 0 0 0.4rem 0; font-weight: 600; }
+#blazor-error-ui .error-actions { margin: 0.4rem 0 0 0; }
+#blazor-error-ui .error-actions a { margin-right: 1rem; }
+#blazor-error-ui details { margin: 0.2rem 0 0.4rem 0; }
+#blazor-error-ui details summary { cursor: pointer; }
+#blazor-error-ui pre {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    margin: 0.4rem 0 0 0;
+    font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
+    font-size: 0.78rem;
+    max-height: 30vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+#blazor-error-ui .dismiss { cursor: pointer; }
+
+.error-card {
+    background: var(--color-bg-elevated, #fff);
+    border: 1px solid var(--color-border, #d0d7de);
+    border-left: 4px solid #d1242f;
+    border-radius: 6px;
+    padding: 0.9rem 1.1rem;
+    margin: 1rem 0;
+}
+.error-card h2 { margin-top: 0; color: #d1242f; }
+.error-card .error-summary { margin: 0.4rem 0 0.6rem 0; }
+.error-card details { margin: 0.4rem 0; }
+.error-card details summary { cursor: pointer; user-select: none; }
+.error-card pre.error-stack {
+    background: var(--color-bg, #f6f8fa);
+    border: 1px solid var(--color-border, #d0d7de);
+    border-radius: 4px;
+    padding: 0.6rem 0.8rem;
+    margin: 0.4rem 0 0 0;
+    font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
+    font-size: 0.8rem;
+    max-height: 40vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.error-card .error-actions { margin-top: 0.7rem; display: flex; gap: 0.6rem; }
+.error-card .btn-primary,
+.error-card .btn-secondary {
+    display: inline-block;
+    padding: 0.35rem 0.9rem;
+    border-radius: 4px;
+    border: 1px solid var(--color-border, #d0d7de);
+    background: var(--color-bg, #f6f8fa);
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+    font: inherit;
+}
+.error-card .btn-primary { background: var(--color-link, #0969da); color: #fff; border-color: transparent; }
+.error-card .btn-primary:hover { filter: brightness(1.05); }
 
 .loading-progress { position: relative; display: block; width: 8rem; height: 8rem; margin: 20vh auto 1rem auto; }
 .loading-progress circle { fill: none; stroke: #e0e0e0; stroke-width: 0.6rem; transform-origin: 50% 50%; transform: rotate(-90deg); }

@@ -1,6 +1,15 @@
-﻿<Router AppAssembly="@typeof(App).Assembly">
+<Router AppAssembly="@typeof(App).Assembly">
     <Found Context="routeData">
-        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+        <ErrorBoundary @ref="_errorBoundary">
+            <ChildContent>
+                <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+            </ChildContent>
+            <ErrorContent Context="ex">
+                <LayoutView Layout="@typeof(MainLayout)">
+                    <ErrorDetails Exception="ex" OnRetry="ResetError" />
+                </LayoutView>
+            </ErrorContent>
+        </ErrorBoundary>
         <FocusOnNavigate RouteData="@routeData" Selector="h1" />
     </Found>
     <NotFound>
@@ -10,3 +19,9 @@
         </LayoutView>
     </NotFound>
 </Router>
+
+@code {
+    private ErrorBoundary? _errorBoundary;
+
+    private void ResetError() => _errorBoundary?.Recover();
+}

@@ -31,4 +31,20 @@ builder.Services.AddScoped<BusyState>();
 builder.Services.AddTransient<Decompiler>();
 builder.Services.AddTransient<Differ>();
 
-await builder.Build().RunAsync();
+var host = builder.Build();
+
+// Make any unobserved task exception visible in the unhandled error UI rather
+// than silently swallowed. WebAssembly is single-threaded so this fires on the
+// finalizer pass; it's still useful for diagnosis even if rare.
+TaskScheduler.UnobservedTaskException += (_, e) =>
+{
+    Console.Error.WriteLine($"UnobservedTaskException: {e.Exception}");
+    e.SetObserved();
+};
+
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+{
+    Console.Error.WriteLine($"UnhandledException: {e.ExceptionObject}");
+};
+
+await host.RunAsync();
