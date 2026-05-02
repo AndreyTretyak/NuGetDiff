@@ -31,6 +31,7 @@
 
 @code {
     [Parameter, EditorRequired] public SideBySideDiff Diff { get; set; } = default!;
+    [Parameter] public string? Language { get; set; }
 
     private static string LineClass(DiffLine? line) => line?.Kind switch
     {
@@ -42,9 +43,29 @@
         _ => string.Empty,
     };
 
-    private static string RenderLine(DiffLine? line)
+    private RenderFragment RenderLine(DiffLine? line) => builder =>
     {
-        if (line is null || line.Kind == DiffLineKind.Imaginary) return string.Empty;
-        return string.IsNullOrEmpty(line.Text) ? "\u00A0" : line.Text;
-    }
+        if (line is null || line.Kind == DiffLineKind.Imaginary)
+        {
+            // Non-breaking space keeps empty cells from collapsing visually.
+            builder.AddMarkupContent(0, "\u00A0");
+            return;
+        }
+        if (string.IsNullOrEmpty(line.Text))
+        {
+            builder.AddMarkupContent(0, "\u00A0");
+            return;
+        }
+        if (!string.IsNullOrEmpty(Language))
+        {
+            builder.OpenElement(1, "code");
+            builder.AddAttribute(2, "class", $"language-{Language}");
+            builder.AddContent(3, line.Text);
+            builder.CloseElement();
+        }
+        else
+        {
+            builder.AddContent(4, line.Text);
+        }
+    };
 }

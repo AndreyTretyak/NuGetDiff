@@ -7,6 +7,8 @@
     <title>NuGetDiff</title>
     <base href="/" />
     <link rel="stylesheet" href="css/app.css" />
+    <link rel="stylesheet" href="lib/prism/prism.min.css" media="(prefers-color-scheme: light)" />
+    <link rel="stylesheet" href="lib/prism/prism-tomorrow.min.css" media="(prefers-color-scheme: dark)" />
     <link rel="icon" type="image/png" href="favicon.png" />
     <link href="NuGetDiff.Web.styles.css" rel="stylesheet" />
     <link href="manifest.webmanifest" rel="manifest" />
@@ -34,6 +36,8 @@
             <a class="dismiss" href="javascript:void(0)">Dismiss</a>
         </p>
     </div>
+    <script src="lib/prism/prism.bundle.min.js" data-manual></script>
+    <script src="js/highlight.js"></script>
     <script src="_framework/blazor.webassembly.js"></script>
     <script>
         (function () {

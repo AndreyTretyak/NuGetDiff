@@ -4,11 +4,13 @@
 @using NuGetDiff.Core.Packages
 @using NuGetDiff.Web.Components
 @using NuGetDiff.Web.Services
+@using Microsoft.JSInterop
 @inherits CancellablePageBase
 @inject PackageResolver Resolver
 @inject BusyState Busy
 @inject MarkdownRenderer Markdown
 @inject NavigationManager Nav
+@inject IJSRuntime JS
 
 <PageTitle>@Path — @Id @Version</PageTitle>
 
@@ -54,7 +56,7 @@
         }
         else if ((_kind == FileKind.Text || _kind == FileKind.Markdown) && _text is not null)
         {
-            <pre class="code-view"><code>@_text</code></pre>
+            <pre class="code-view"><code class="@CodeLanguageClass">@_text</code></pre>
         }
         else if (_kind == FileKind.Assembly)
         {
@@ -94,6 +96,20 @@
     private DecompilationError? _decompError;
     private string? _lengthDescription;
     private FileTreeNode? _tree;
+    private bool _shouldHighlight;
+
+    // Cap the size of content we hand to Prism so very large generated files
+    // (e.g. 1+ MB minified bundles) don't freeze the UI.
+    private const int MaxHighlightChars = 500_000;
+
+    private string CodeLanguageClass
+    {
+        get
+        {
+            var lang = LanguageDetector.FromPath(Path);
+            return lang is null ? string.Empty : $"language-{lang}";
+        }
+    }
 
     // Cache the contents tree per (id, version) so re-navigating between files
     // in the same package doesn't redownload and reparse it every time.
@@ -170,7 +186,43 @@
         }
         finally
         {
-            if (!ct.IsCancellationRequested) _loading = false;
+            if (!ct.IsCancellationRequested)
+            {
+                _loading = false;
+                var contentLength = _text?.Length ?? _decompilation?.CSharp?.Length ?? 0;
+                var hasLanguage = !string.IsNullOrEmpty(LanguageDetector.FromPath(Path));
+                _shouldHighlight =
+                    contentLength > 0
+                    && contentLength <= MaxHighlightChars
+                    && (
+                        (_kind == FileKind.Markdown && _text is not null)                          // README code fences
+                        || (_kind == FileKind.Text && _text is not null && hasLanguage)             // .cs/.json/etc.
+                        || (_kind == FileKind.Assembly && _decompilation is not null)               // decompiled C#
+                    );
+            }
+        }
+    }
+
+    // Re-highlight after every render: Razor may rewrite <code>'s text content
+    // on a re-render that re-evaluates the markup, which would discard Prism's
+    // spans. Prism.highlightAllUnder is idempotent because it tokenises from
+    // textContent.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_shouldHighlight)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("nuGetDiff.highlightAll", ".file-content");
+            }
+            catch (JSException)
+            {
+                // Prism not loaded — non-fatal.
+            }
+            catch (TaskCanceledException)
+            {
+                // Component disposed mid-call — safe to ignore.
+            }
         }
     }
 
@@ -183,6 +235,7 @@
         _decompilation = null;
         _decompError = null;
         _lengthDescription = null;
+        _shouldHighlight = false;
     }
 
     private void OnFileClick(FileTreeNode node)

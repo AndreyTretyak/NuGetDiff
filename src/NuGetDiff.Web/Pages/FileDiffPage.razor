@@ -4,10 +4,12 @@
 @using NuGetDiff.Core.Packages
 @using NuGetDiff.Web.Components
 @using NuGetDiff.Web.Services
+@using Microsoft.JSInterop
 @inherits CancellablePageBase
 @inject PackageResolver Resolver
 @inject BusyState Busy
 @inject NavigationManager Nav
+@inject IJSRuntime JS
 
 <PageTitle>@Path — @Id @V1 → @V2</PageTitle>
 
@@ -63,7 +65,7 @@
                 case FileDiffKind.Assembly:
                     if (_diff.Text is not null)
                     {
-                        <DiffView Diff="_diff.Text" />
+                        <DiffView Diff="_diff.Text" Language="@_language" />
                     }
                     else
                     {
@@ -96,6 +98,12 @@
     private FileTreeNode? _tree;
     private string? _error;
     private bool _loading = true;
+    private string? _language;
+    private bool _shouldHighlight;
+
+    // Skip syntax highlighting for very large diffs to keep the UI responsive:
+    // Prism would re-tokenise tens of thousands of <code> nodes synchronously.
+    private const int MaxHighlightRows = 5000;
 
     // Cache the tree-diff per (id, v1, v2) so re-navigating between files in the
     // same comparison doesn't redownload and rediff the whole pair every time.
@@ -113,6 +121,8 @@
         _diff = null;
         _error = null;
         _loading = true;
+        _language = LanguageDetector.FromPath(Path);
+        _shouldHighlight = false;
         StateHasChanged();
         if (string.IsNullOrEmpty(Path))
         {
@@ -167,7 +177,39 @@
         }
         finally
         {
-            if (!ct.IsCancellationRequested) _loading = false;
+            if (!ct.IsCancellationRequested)
+            {
+                _loading = false;
+                _shouldHighlight =
+                    _diff?.Text is not null
+                    && !string.IsNullOrEmpty(_language)
+                    && _diff.Text.Old.Count <= MaxHighlightRows
+                    && _diff.Text.New.Count <= MaxHighlightRows;
+            }
+        }
+    }
+
+    // Re-run Prism after EVERY render — Razor may rewrite <code> text content
+    // on a re-render that touches DiffView, which would discard Prism's spans.
+    // Prism.highlightAllUnder is idempotent: it tokenises from textContent,
+    // which yields the same result whether the cell currently shows raw text
+    // or already-highlighted spans.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_shouldHighlight)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("nuGetDiff.highlightAll", ".file-content");
+            }
+            catch (JSException)
+            {
+                // Prism not loaded or no element to highlight — non-fatal.
+            }
+            catch (TaskCanceledException)
+            {
+                // Component disposed mid-call — safe to ignore.
+            }
         }
     }
 

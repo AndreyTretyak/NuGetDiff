@@ -261,6 +261,14 @@ h3 { font-size: 1.05rem; }
 .file-content {
     min-width: 0; /* allow long pre/code to shrink in the grid track */
 }
+
+/* On per-file pages (browse + diff) the code area benefits from every
+   horizontal pixel — break out of the global content max-width. Browsers
+   without :has() degrade gracefully to the regular constrained layout. */
+.app-main:has(> .file-layout) {
+    max-width: none;
+}
+
 @media (max-width: 800px) {
     .file-layout { grid-template-columns: 1fr; }
     .file-sidebar { position: static; max-height: 40vh; }
@@ -303,6 +311,29 @@ h3 { font-size: 1.05rem; }
 .diff-table td.line.deleted { background: var(--color-removed-bg); color: var(--color-removed-fg); }
 .diff-table td.line.modified { background: var(--color-modified-bg); color: var(--color-modified-fg); }
 .diff-table td.line.imaginary { background: var(--color-imaginary-bg); }
+
+/* Tame Prism inside our themed containers: keep token colours, drop Prism's
+   own background / padding / shadow so our diff colouring and code-view
+   chrome stay in charge. */
+.diff-table code[class*="language-"],
+.code-view > code[class*="language-"] {
+    background: none !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    font-size: inherit !important;
+    line-height: inherit !important;
+    white-space: inherit !important;
+}
+/* Prism's `.token.deleted` / `.token.inserted` would clash with our diff
+   row colouring inside the table — neutralise them. */
+.diff-table .token.deleted,
+.diff-table .token.inserted {
+    background: transparent !important;
+    color: inherit !important;
+}
 
 .busy-overlay {
     position: fixed;
