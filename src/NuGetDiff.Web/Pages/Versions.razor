@@ -1,0 +1,86 @@
+@page "/{id}"
+@using NuGetDiff.Web.Services
+@inherits CancellablePageBase
+@inject NuGetRegistrationClient Registry
+
+<PageTitle>@Id — versions</PageTitle>
+
+<nav class="breadcrumb">
+    <a href="/">Home</a> / <strong>@Id</strong>
+</nav>
+
+<h1>@Id</h1>
+
+@if (_loading)
+{
+    <p>Loading versions…</p>
+}
+else if (_error is not null)
+{
+    <p class="error">@_error</p>
+}
+else if (_versions is null || _versions.Count == 0)
+{
+    <p>No versions found for <code>@Id</code> on nuget.org.</p>
+}
+else
+{
+    <p>@_versions.Count versions. Pick one to browse, or pick two to diff (use the URL pattern <code>/@Id/v1/v2</code>).</p>
+    <table class="versions">
+        <thead>
+            <tr>
+                <th>Version</th>
+                <th>Published</th>
+                <th>Listed</th>
+                <th>Browse</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var v in _versions)
+            {
+                <tr>
+                    <td><code>@v.Version</code></td>
+                    <td>@(v.Published?.ToString("yyyy-MM-dd") ?? "")</td>
+                    <td>@(v.Listed ? "yes" : "no")</td>
+                    <td><a href="/@Uri.EscapeDataString(Id)/@Uri.EscapeDataString(v.Version)">browse</a></td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    [Parameter] public string Id { get; set; } = string.Empty;
+
+    private IReadOnlyList<NuGetRegistrationClient.VersionInfo>? _versions;
+    private bool _loading = true;
+    private string? _error;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var ct = BeginLoad();
+        _loading = true;
+        _error = null;
+        _versions = null;
+        StateHasChanged();
+        try
+        {
+            var versions = await Registry.GetVersionsAsync(Id, ct);
+            if (ct.IsCancellationRequested) return;
+            _versions = versions;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            if (ct.IsCancellationRequested) return;
+            _error = $"Failed to fetch versions: {ex.Message}";
+        }
+        finally
+        {
+            if (!ct.IsCancellationRequested) _loading = false;
+        }
+    }
+}

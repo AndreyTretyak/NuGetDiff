@@ -1,0 +1,136 @@
+@page "/{id}/{version}"
+@using NuGetDiff.Core.Models
+@using NuGetDiff.Core.Packages
+@using NuGetDiff.Web.Components
+@using NuGetDiff.Web.Services
+@inherits CancellablePageBase
+@inject PackageResolver Resolver
+@inject BusyState Busy
+@inject NavigationManager Nav
+
+<PageTitle>@Id @Version</PageTitle>
+
+<nav class="breadcrumb">
+    <a href="/">Home</a> / <a href="/@Uri.EscapeDataString(Id)">@Id</a> / <strong>@Version</strong>
+</nav>
+
+<h1>@Id <small class="version">@Version</small></h1>
+
+@if (_error is not null)
+{
+    <p class="error">@_error</p>
+}
+else if (_contents is null)
+{
+    <p>Loading package…</p>
+}
+else
+{
+    <section class="metadata">
+        @if (!string.IsNullOrWhiteSpace(_contents.Metadata.Description))
+        {
+            <p class="description">@_contents.Metadata.Description</p>
+        }
+        <dl class="meta-grid">
+            @if (!string.IsNullOrWhiteSpace(_contents.Metadata.Authors))
+            {
+                <dt>Authors</dt><dd>@_contents.Metadata.Authors</dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_contents.Metadata.LicenseExpression))
+            {
+                <dt>License</dt><dd><code>@_contents.Metadata.LicenseExpression</code></dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_contents.Metadata.ProjectUrl))
+            {
+                <dt>Project</dt><dd><a href="@_contents.Metadata.ProjectUrl" target="_blank" rel="noopener">@_contents.Metadata.ProjectUrl</a></dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_contents.Metadata.RepositoryUrl))
+            {
+                <dt>Repository</dt><dd><a href="@_contents.Metadata.RepositoryUrl" target="_blank" rel="noopener">@_contents.Metadata.RepositoryUrl</a></dd>
+            }
+            @if (_contents.Metadata.TargetFrameworks.Count > 0)
+            {
+                <dt>TFMs</dt><dd>@string.Join(", ", _contents.Metadata.TargetFrameworks)</dd>
+            }
+        </dl>
+
+        @if (_contents.Metadata.DependencyGroups.Count > 0)
+        {
+            <details class="dependencies">
+                <summary>Dependencies (@_contents.Metadata.DependencyGroups.Count groups)</summary>
+                @foreach (var group in _contents.Metadata.DependencyGroups)
+                {
+                    <h3>@(string.IsNullOrEmpty(group.TargetFramework) ? "(any)" : group.TargetFramework)</h3>
+                    @if (group.Dependencies.Count == 0)
+                    {
+                        <p><em>no dependencies</em></p>
+                    }
+                    else
+                    {
+                        <ul>
+                            @foreach (var d in group.Dependencies)
+                            {
+                                <li><a href="/@Uri.EscapeDataString(d.Id)"><code>@d.Id</code></a> <code>@d.VersionRange</code></li>
+                            }
+                        </ul>
+                    }
+                }
+            </details>
+        }
+    </section>
+
+    <section class="files">
+        <h2>Contents (@_contents.Files.Count files)</h2>
+        @{
+            var tree = FileTreeBuilder.Build(_contents.Files);
+        }
+        <FileTree Node="tree" OnFileClick="OnFileClick" />
+    </section>
+}
+
+@code {
+    [Parameter] public string Id { get; set; } = string.Empty;
+    [Parameter] public string Version { get; set; } = string.Empty;
+
+    private PackageContents? _contents;
+    private string? _error;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var ct = BeginLoad();
+        _contents = null;
+        _error = null;
+        StateHasChanged();
+        using var _ = Busy.Begin($"Loading {Id} {Version}…");
+        try
+        {
+            await using var stream = await Resolver.OpenOnlineAsync(Id, Version, ct);
+            if (ct.IsCancellationRequested) return;
+            if (stream is null)
+            {
+                _error = $"Could not find {Id} {Version} on nuget.org.";
+                return;
+            }
+            using var reader = new PackageReader(stream);
+            var contents = reader.Read();
+            if (ct.IsCancellationRequested) return;
+            _contents = contents;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            if (ct.IsCancellationRequested) return;
+            _error = $"Failed to load package: {ex.Message}";
+        }
+    }
+
+    private void OnFileClick(FileTreeNode node)
+    {
+        if (node.IsDirectory) return;
+        var path = Uri.EscapeDataString(node.FullPath);
+        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={path}");
+    }
+}

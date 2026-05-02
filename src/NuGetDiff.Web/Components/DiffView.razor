@@ -1,0 +1,50 @@
+@using NuGetDiff.Core.Models
+
+<div class="diff-view">
+    <table class="diff-table">
+        <colgroup>
+            <col class="num-col" />
+            <col class="text-col" />
+            <col class="num-col" />
+            <col class="text-col" />
+        </colgroup>
+        <tbody>
+            @{
+                var oldLines = Diff.Old;
+                var newLines = Diff.New;
+                var rows = Math.Max(oldLines.Count, newLines.Count);
+            }
+            @for (var i = 0; i < rows; i++)
+            {
+                var o = i < oldLines.Count ? oldLines[i] : null;
+                var n = i < newLines.Count ? newLines[i] : null;
+                <tr>
+                    <td class="num">@(o?.OldNumber)</td>
+                    <td class="line @LineClass(o)">@RenderLine(o)</td>
+                    <td class="num">@(n?.NewNumber)</td>
+                    <td class="line @LineClass(n)">@RenderLine(n)</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public SideBySideDiff Diff { get; set; } = default!;
+
+    private static string LineClass(DiffLine? line) => line?.Kind switch
+    {
+        null => string.Empty,
+        DiffLineKind.Imaginary => "imaginary",
+        DiffLineKind.Inserted => "inserted",
+        DiffLineKind.Deleted => "deleted",
+        DiffLineKind.Modified => "modified",
+        _ => string.Empty,
+    };
+
+    private static string RenderLine(DiffLine? line)
+    {
+        if (line is null || line.Kind == DiffLineKind.Imaginary) return string.Empty;
+        return string.IsNullOrEmpty(line.Text) ? "\u00A0" : line.Text;
+    }
+}

@@ -1,38 +1,92 @@
-# New Repo Project
+# NuGetDiff
 
-The new-repo project is a default template for .NET Foundation projects. It's also probably a fine start for other .NET projects (have at it, but change the license). It contains the correct license, a decent README, and initial project structure (including a standard .gitignore for the Visual Studio family of products).
+A Blazor WebAssembly app that browses the contents of any NuGet package and diffs
+two versions side‑by‑side, including decompiled C# of assemblies via
+[ILSpy](https://github.com/icsharpcode/ILSpy)'s `ICSharpCode.Decompiler`.
 
-You can learn more about the project from the project [Documentation](Documentation).
+Runs entirely in the browser — no server required. Once a package has been
+loaded it is cached in IndexedDB so the next visit is fully offline.
 
-## Using New Repo
+## URL contract
 
-You can simply `git clone` this project to get started. It is recommended that you don't preserve history of the project (it isn't generally meaningful) for your repo, but make a copy and `git init` your project from source.
+- `mysite.com/` — landing page with package lookup and `.nupkg` upload zone
+- `mysite.com/{id}` — list of versions for `{id}` from nuget.org
+- `mysite.com/{id}/{version}` — browse the contents of one package
+- `mysite.com/{id}/{version}/file?path={packagePath}` — view a single file
+  (Markdown rendered, text plain, assemblies decompiled to C#)
+- `mysite.com/{id}/{v1}/{v2}` — full diff of two versions (file tree + per‑file)
+- `mysite.com/{id}/{v1}/{v2}/file?path={packagePath}` — diff one file
+- `mysite.com/local/{contentHash}` — same browse view backed by a `.nupkg`
+  uploaded into the current session
 
-Consult [CHECKLIST.md](CHECKLIST.md) for helpful suggestions on preparing your repo to go public.
+The path inside a package is passed via `?path=` so that reserved URL
+characters like `#`, `+` and `%` round‑trip correctly.
 
-## Building
+## Solution layout
 
-You don't "build" New Repo, however, this will be meaningful for many other projects.
+```
+NuGetDiff.slnx
+├── src/
+│   ├── NuGetDiff.Core/   # Pure managed library: package reader, decompiler, differ
+│   └── NuGetDiff.Web/    # Blazor WebAssembly app
+└── tests/
+    └── NuGetDiff.Core.Tests/  # xUnit
+```
 
-## Contributing
+`NuGetDiff.Core` has no Blazor or filesystem dependencies, so it works
+unmodified in WebAssembly and is easy to unit‑test on desktop .NET. All
+package access is via streams; ILSpy's decompiler is wrapped with a custom
+in‑memory `IAssemblyResolver` that resolves sibling assemblies inside the
+package without touching disk.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for information on contributing to this project.
+## Building and testing
 
-This project has adopted the code of conduct defined by the [Contributor Covenant](http://contributor-covenant.org/) 
-to clarify expected behavior in our community. For more information, see the [.NET Foundation Code of Conduct](http://www.dotnetfoundation.org/code-of-conduct).
+```pwsh
+dotnet build NuGetDiff.slnx
+dotnet test NuGetDiff.slnx
+dotnet run --project src/NuGetDiff.Web
+```
+
+The dev server listens on the URL printed by Kestrel (default
+`http://localhost:5174` per `launchSettings.json`).
+
+To produce a static deployable site:
+
+```pwsh
+dotnet publish src/NuGetDiff.Web -c Release
+```
+
+The output under `bin/Release/net8.0/publish/wwwroot` can be served by any
+static host (GitHub Pages, S3, etc.). Source maps and the service‑worker
+manifest are emitted by the standard Blazor PWA template.
+
+## Offline use
+
+1. Drop a `.nupkg` into the upload zone on the home page. The app reads it,
+   navigates to `/local/{contentHash}`, and adds the bytes to the in‑memory
+   `UploadedPackageSource` so the package can be browsed without network
+   access.
+2. Online packages are cached in IndexedDB after the first download. The next
+   visit reuses the cached bytes.
+3. The PWA service worker caches the app shell and Blazor runtime, so the
+   site itself loads even with the network completely off.
+
+## Security note
+
+NuGet packages are untrusted input. Markdown READMEs are rendered with
+Markdig configured to disable raw HTML, package text files are shown as
+plain text inside `<pre>`, and decompiled C# is treated as text. Embedded
+HTML/SVG inside packages is never injected into the DOM.
+
+## Limitations (v1)
+
+- Symbol packages (`.snupkg`) and PDB‑aware decompilation are not supported.
+- Decompilation produces C# only; no IL view toggle.
+- Default Blazor WebAssembly is single‑threaded, so very large packages
+  produce noticeable busy time on the UI thread (a top‑level overlay shows
+  progress between chunks).
+- Only nuget.org is queried for online versions and downloads.
 
 ## License
 
-This project is licensed with the [MIT license](LICENSE).
-
-## .NET Foundation
-
-New Repo is a [.NET Foundation project](https://dotnetfoundation.org/projects).
-
-## Related Projects
-
-You should take a look at these related projects:
-
-- [.NET Core](https://github.com/dotnet/core)
-- [ASP.NET](https://github.com/aspnet)
-- [Mono](https://github.com/mono)
+MIT — see [LICENSE](LICENSE).

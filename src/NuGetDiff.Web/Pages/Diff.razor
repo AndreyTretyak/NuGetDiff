@@ -1,0 +1,99 @@
+@page "/{id}/{v1}/{v2}"
+@using NuGetDiff.Core.Diffing
+@using NuGetDiff.Core.Models
+@using NuGetDiff.Core.Packages
+@using NuGetDiff.Web.Components
+@using NuGetDiff.Web.Services
+@inherits CancellablePageBase
+@inject PackageResolver Resolver
+@inject BusyState Busy
+@inject NavigationManager Nav
+
+<PageTitle>@Id @V1 → @V2</PageTitle>
+
+<nav class="breadcrumb">
+    <a href="/">Home</a> /
+    <a href="/@Uri.EscapeDataString(Id)">@Id</a> /
+    <strong>@V1 → @V2</strong>
+</nav>
+
+<h1>@Id <small class="version">@V1 → @V2</small></h1>
+
+@if (_error is not null)
+{
+    <p class="error">@_error</p>
+}
+else if (_diff is null)
+{
+    <p>Computing diff…</p>
+}
+else
+{
+    var added = _diff.Changes.Count(c => c.Kind == FileChangeKind.Added);
+    var removed = _diff.Changes.Count(c => c.Kind == FileChangeKind.Removed);
+    var modified = _diff.Changes.Count(c => c.Kind == FileChangeKind.Modified);
+    var renamed = _diff.Changes.Count(c => c.Kind == FileChangeKind.Renamed);
+    <p class="diff-summary">
+        <span class="badge badge-added">+@added</span>
+        <span class="badge badge-removed">−@removed</span>
+        <span class="badge badge-modified">~@modified</span>
+        <span class="badge badge-renamed">⇄@renamed</span>
+        <span class="muted">(unchanged not shown)</span>
+    </p>
+
+    var changedOnly = _diff.Changes.Where(c => c.Kind != FileChangeKind.Unchanged).ToList();
+    var tree = FileTreeBuilder.BuildFromChanges(changedOnly);
+    <FileTree Node="tree" OnFileClick="OnFileClick" />
+}
+
+@code {
+    [Parameter] public string Id { get; set; } = string.Empty;
+    [Parameter] public string V1 { get; set; } = string.Empty;
+    [Parameter] public string V2 { get; set; } = string.Empty;
+
+    private TreeDiff? _diff;
+    private string? _error;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var ct = BeginLoad();
+        _diff = null;
+        _error = null;
+        StateHasChanged();
+        using var _ = Busy.Begin($"Loading {Id} {V1} and {V2}…");
+        try
+        {
+            await using var s1 = await Resolver.OpenOnlineAsync(Id, V1, ct);
+            if (ct.IsCancellationRequested) return;
+            await using var s2 = await Resolver.OpenOnlineAsync(Id, V2, ct);
+            if (ct.IsCancellationRequested) return;
+            if (s1 is null) { _error = $"Could not find {Id} {V1}."; return; }
+            if (s2 is null) { _error = $"Could not find {Id} {V2}."; return; }
+
+            using var oldR = new PackageReader(s1);
+            using var newR = new PackageReader(s2);
+            Busy.Update("Computing tree diff…");
+            await Task.Yield();
+            if (ct.IsCancellationRequested) return;
+            var diff = new Differ().DiffTree(oldR, newR);
+            if (ct.IsCancellationRequested) return;
+            _diff = diff;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            if (ct.IsCancellationRequested) return;
+            _error = $"Failed to diff: {ex.Message}";
+        }
+    }
+
+    private void OnFileClick(FileTreeNode node)
+    {
+        if (node.IsDirectory) return;
+        var path = Uri.EscapeDataString(node.FullPath);
+        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(V1)}/{Uri.EscapeDataString(V2)}/file?path={path}");
+    }
+}

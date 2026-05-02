@@ -1,0 +1,62 @@
+@using NuGetDiff.Core.Models
+@using NuGetDiff.Web.Services
+@inject NavigationManager Nav
+
+<ul class="file-tree @(Root ? "file-tree-root" : "")">
+    @foreach (var child in Node.Children)
+    {
+        <li class="file-tree-node @(child.IsDirectory ? "is-dir" : "is-file")">
+            @if (child.IsDirectory)
+            {
+                <details open>
+                    <summary><span class="icon">📁</span> @child.Name</summary>
+                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick" />
+                </details>
+            }
+            else
+            {
+                <a class="file-link @ChangeClass(child)" href="javascript:void(0)" @onclick="@(() => OnFileClick.InvokeAsync(child))">
+                    <span class="icon">@KindIcon(child)</span>
+                    <span class="name">@child.Name</span>
+                    @if (child.Change is { Kind: var ck } && ck != FileChangeKind.Unchanged)
+                    {
+                        <span class="badge badge-@ck.ToString().ToLowerInvariant()">@BadgeText(ck)</span>
+                    }
+                </a>
+            }
+        </li>
+    }
+</ul>
+
+@code {
+    [Parameter, EditorRequired] public FileTreeNode Node { get; set; } = default!;
+    [Parameter] public bool Root { get; set; } = true;
+    [Parameter] public EventCallback<FileTreeNode> OnFileClick { get; set; }
+
+    private static string KindIcon(FileTreeNode node) => node.Entry?.Kind switch
+    {
+        FileKind.Markdown => "📝",
+        FileKind.Text => "📄",
+        FileKind.Assembly => "🧩",
+        FileKind.Binary => "📦",
+        _ => "❔",
+    };
+
+    private static string ChangeClass(FileTreeNode node) => node.Change?.Kind switch
+    {
+        FileChangeKind.Added => "change-added",
+        FileChangeKind.Removed => "change-removed",
+        FileChangeKind.Modified => "change-modified",
+        FileChangeKind.Renamed => "change-renamed",
+        _ => string.Empty,
+    };
+
+    private static string BadgeText(FileChangeKind kind) => kind switch
+    {
+        FileChangeKind.Added => "+",
+        FileChangeKind.Removed => "−",
+        FileChangeKind.Modified => "~",
+        FileChangeKind.Renamed => "⇄",
+        _ => string.Empty,
+    };
+}

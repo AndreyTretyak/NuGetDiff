@@ -1,0 +1,71 @@
+@using Microsoft.AspNetCore.Components.Forms
+@using NuGetDiff.Core.Packages
+@using NuGetDiff.Web.Services
+@inject UploadedPackageSource Uploads
+@inject NavigationManager Nav
+
+<div class="upload-zone">
+    <p class="upload-prompt">
+        Pick one or more <code>.nupkg</code> files to load:
+        <InputFile OnChange="OnInputFileChange" accept=".nupkg" multiple="true" class="hidden-input" id="upload-input" />
+        <label class="browse-label" for="upload-input">browse for one</label>.
+    </p>
+    @if (!string.IsNullOrEmpty(_status))
+    {
+        <p class="upload-status @_statusClass">@_status</p>
+    }
+</div>
+
+@code {
+    private const long MaxBytes = 256L * 1024 * 1024; // 256 MB
+
+    private string? _status;
+    private string _statusClass = string.Empty;
+
+    private async Task OnInputFileChange(InputFileChangeEventArgs e)
+    {
+        foreach (var file in e.GetMultipleFiles(maximumFileCount: 32))
+        {
+            await IngestAsync(file);
+        }
+    }
+
+    private async Task IngestAsync(IBrowserFile file)
+    {
+        if (!file.Name.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
+        {
+            SetStatus($"'{file.Name}' is not a .nupkg file.", "error");
+            return;
+        }
+        if (file.Size > MaxBytes)
+        {
+            SetStatus($"'{file.Name}' exceeds the {MaxBytes / 1024 / 1024} MB upload limit.", "error");
+            return;
+        }
+
+        try
+        {
+            await using var stream = file.OpenReadStream(maxAllowedSize: MaxBytes);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            var bytes = ms.ToArray();
+
+            using var reader = new PackageReader(new MemoryStream(bytes));
+            var meta = reader.Metadata;
+            var hash = Uploads.Add(meta.Id, meta.Version, bytes);
+            SetStatus($"Loaded {meta.Id} {meta.Version}.", "ok");
+            Nav.NavigateTo($"/local/{hash}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Failed to read '{file.Name}': {ex.Message}", "error");
+        }
+    }
+
+    private void SetStatus(string message, string statusClass)
+    {
+        _status = message;
+        _statusClass = statusClass;
+        StateHasChanged();
+    }
+}

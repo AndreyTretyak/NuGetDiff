@@ -1,0 +1,18 @@
+@inject NuGetDiff.Web.Services.BusyState Busy
+@implements IDisposable
+
+@if (Busy.IsBusy)
+{
+    <div class="busy-overlay" role="status" aria-live="polite">
+        <div class="busy-card">
+            <div class="busy-spinner" />
+            <div class="busy-message">@(Busy.Message ?? "Working…")</div>
+        </div>
+    </div>
+}
+
+@code {
+    protected override void OnInitialized() => Busy.Changed += OnChanged;
+    public void Dispose() => Busy.Changed -= OnChanged;
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+}

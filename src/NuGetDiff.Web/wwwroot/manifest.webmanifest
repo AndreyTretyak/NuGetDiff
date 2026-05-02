@@ -1,0 +1,23 @@
+{
+  "name": "NuGetDiff",
+  "short_name": "NuGetDiff",
+  "id": "./",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f7f9",
+  "theme_color": "#0969da",
+  "description": "Browse and diff the contents of NuGet packages, with decompiled C# from ILSpy.",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    },
+    {
+      "src": "icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    }
+  ]
+}

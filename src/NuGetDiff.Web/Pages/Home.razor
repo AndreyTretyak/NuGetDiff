@@ -1,0 +1,62 @@
+@page "/"
+@inject NavigationManager Nav
+
+<PageTitle>NuGetDiff — browse and diff NuGet packages</PageTitle>
+
+<div class="hero">
+    <h1>NuGetDiff</h1>
+    <p class="tagline">
+        Browse the contents of any NuGet package and diff two versions side‑by‑side,
+        with decompiled C# from <a href="https://github.com/icsharpcode/ILSpy" target="_blank" rel="noopener">ILSpy</a>.
+        Runs entirely in your browser. Works offline once a package has been loaded.
+    </p>
+</div>
+
+<section class="lookup">
+    <h2>Look up a package</h2>
+    <form @onsubmit="OnSubmit" @onsubmit:preventDefault="true" class="lookup-form">
+        <input type="text" placeholder="Package id, e.g. Newtonsoft.Json" @bind="_id" @bind:event="oninput" autofocus />
+        <input type="text" placeholder="Version (optional), e.g. 13.0.1" @bind="_version" @bind:event="oninput" />
+        <button type="submit" disabled="@(string.IsNullOrWhiteSpace(_id))">Open</button>
+    </form>
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <p class="error">@_error</p>
+    }
+</section>
+
+<section class="upload">
+    <h2>Or load an offline <code>.nupkg</code></h2>
+    <UploadZone />
+</section>
+
+<section class="examples">
+    <h2>Try one of these</h2>
+    <ul class="example-list">
+        <li><a href="/Newtonsoft.Json/13.0.1">Newtonsoft.Json 13.0.1</a></li>
+        <li><a href="/Newtonsoft.Json/13.0.1/13.0.3">Newtonsoft.Json 13.0.1 → 13.0.3 diff</a></li>
+        <li><a href="/Serilog/3.1.1">Serilog 3.1.1</a></li>
+        <li><a href="/Microsoft.Extensions.Logging/8.0.0">Microsoft.Extensions.Logging 8.0.0</a></li>
+    </ul>
+</section>
+
+@code {
+    private string _id = string.Empty;
+    private string _version = string.Empty;
+    private string? _error;
+
+    private void OnSubmit()
+    {
+        var id = _id.Trim();
+        var version = _version.Trim();
+        if (string.IsNullOrEmpty(id))
+        {
+            _error = "Package id is required.";
+            return;
+        }
+        _error = null;
+        Nav.NavigateTo(string.IsNullOrEmpty(version)
+            ? $"/{Uri.EscapeDataString(id)}"
+            : $"/{Uri.EscapeDataString(id)}/{Uri.EscapeDataString(version)}");
+    }
+}

@@ -1,0 +1,152 @@
+@page "/local/{hash}/file"
+@using NuGetDiff.Core.Decompilation
+@using NuGetDiff.Core.Models
+@using NuGetDiff.Core.Packages
+@using NuGetDiff.Web.Services
+@inherits CancellablePageBase
+@inject PackageResolver Resolver
+@inject BusyState Busy
+@inject MarkdownRenderer Markdown
+
+<PageTitle>@Path</PageTitle>
+
+<nav class="breadcrumb">
+    <a href="/">Home</a> /
+    <a href="/local/@Hash">local upload</a> /
+    <strong>@Path</strong>
+</nav>
+
+<h1>@System.IO.Path.GetFileName(Path)</h1>
+<p class="muted">@Path · local upload</p>
+
+@if (_error is not null)
+{
+    <p class="error">@_error</p>
+}
+else if (_loading)
+{
+    <p>Loading…</p>
+}
+else if (_kind == FileKind.Markdown && _text is not null)
+{
+    <article class="markdown-body">@((MarkupString)Markdown.ToHtml(_text))</article>
+}
+else if ((_kind == FileKind.Text) && _text is not null)
+{
+    <pre class="code-view"><code>@_text</code></pre>
+}
+else if (_kind == FileKind.Assembly)
+{
+    @if (_decompilation is not null)
+    {
+        @if (_decompilation.Warnings.Count > 0)
+        {
+            <details class="warnings">
+                <summary>@_decompilation.Warnings.Count warnings</summary>
+                <ul>@foreach (var w in _decompilation.Warnings) { <li>@w</li> }</ul>
+            </details>
+        }
+        <pre class="code-view"><code class="language-csharp">@_decompilation.CSharp</code></pre>
+    }
+    else if (_decompError is not null)
+    {
+        <p class="error">@_decompError.Message @(_decompError.Detail is null ? "" : "— " + _decompError.Detail)</p>
+    }
+}
+else if (_kind == FileKind.Binary)
+{
+    <p class="muted">Binary file. @_lengthDescription</p>
+}
+
+@code {
+    [Parameter] public string Hash { get; set; } = string.Empty;
+    [SupplyParameterFromQuery(Name = "path")] public string Path { get; set; } = string.Empty;
+
+    private bool _loading = true;
+    private string? _error;
+    private FileKind _kind = FileKind.Unknown;
+    private string? _text;
+    private DecompilationResult? _decompilation;
+    private DecompilationError? _decompError;
+    private string? _lengthDescription;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var ct = BeginLoad();
+        _loading = true;
+        _error = null;
+        _kind = FileKind.Unknown;
+        _text = null;
+        _decompilation = null;
+        _decompError = null;
+        StateHasChanged();
+        if (string.IsNullOrEmpty(Path))
+        {
+            _error = "No file path provided.";
+            _loading = false;
+            return;
+        }
+
+        using var _ = Busy.Begin($"Loading {Path}…");
+        try
+        {
+            await using var stream = await Resolver.OpenLocalAsync(Hash, ct);
+            if (ct.IsCancellationRequested) return;
+            if (stream is null) { _error = "No uploaded package matches this hash."; _loading = false; return; }
+            using var reader = new PackageReader(stream);
+            if (!reader.ContainsFile(Path)) { _error = $"File '{Path}' not in package."; _loading = false; return; }
+
+            var entry = reader.Files.First(f => string.Equals(f.Path, Path, StringComparison.OrdinalIgnoreCase));
+            _kind = entry.Kind;
+            _lengthDescription = $"{entry.Length} bytes";
+
+            if (_kind == FileKind.Text || _kind == FileKind.Markdown)
+            {
+                var bytes = reader.ReadFileBytes(Path);
+                _text = DecodeText(bytes);
+            }
+            else if (_kind == FileKind.Assembly)
+            {
+                Busy.Update($"Decompiling {Path}…");
+                await Task.Yield();
+                if (ct.IsCancellationRequested) return;
+                var result = new Decompiler().DecompileFromPackage(reader, Path);
+                if (ct.IsCancellationRequested) return;
+                if (result.IsOk) _decompilation = result.Ok;
+                else _decompError = result.Err;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            if (ct.IsCancellationRequested) return;
+            _error = $"Failed to read file: {ex.Message}";
+        }
+        finally
+        {
+            if (!ct.IsCancellationRequested) _loading = false;
+        }
+    }
+
+    private static string DecodeText(byte[] bytes)
+    {
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            return System.Text.Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            return System.Text.Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return System.Text.Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+        try
+        {
+            var enc = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            return enc.GetString(bytes);
+        }
+        catch (System.Text.DecoderFallbackException)
+        {
+            return System.Text.Encoding.Latin1.GetString(bytes);
+        }
+    }
+}

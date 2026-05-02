@@ -1,0 +1,31 @@
+﻿@inherits LayoutComponentBase
+
+<div class="app-shell">
+    <header class="app-header">
+        <a class="brand" href="/">
+            <span class="brand-mark">⌬</span>
+            <span class="brand-text">NuGetDiff</span>
+        </a>
+        <nav class="header-nav">
+            <a href="/">Home</a>
+            <a href="https://github.com/AndreyTretyak/NuGetDiff" target="_blank" rel="noopener">Source</a>
+        </nav>
+    </header>
+
+    <main class="app-main">
+        @Body
+    </main>
+
+    <footer class="app-footer">
+        <span>Decompilation by <a href="https://github.com/icsharpcode/ILSpy" target="_blank" rel="noopener">ILSpy</a>.</span>
+        <span>Runs entirely in your browser.</span>
+    </footer>
+
+    <BusyOverlay />
+</div>
+
+<div id="blazor-error-ui">
+    An unhandled error has occurred.
+    <a href="" class="reload">Reload</a>
+    <a class="dismiss">🗙</a>
+</div>

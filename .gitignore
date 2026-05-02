@@ -164,6 +164,9 @@ PublishScripts/
 **/packages/*
 # except build/, which is used as an MSBuild target.
 !**/packages/build/
+# Don't ignore our own NuGetDiff.Core/Packages source folder
+!src/NuGetDiff.Core/Packages/
+!src/NuGetDiff.Core/Packages/**
 # Uncomment if necessary however generally it will be regenerated when needed
 #!**/packages/repositories.config
 # NuGet v3's project.json files produces more ignorable files
