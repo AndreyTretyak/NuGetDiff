@@ -12,13 +12,13 @@
 @inject NavigationManager Nav
 @inject IJSRuntime JS
 
-<PageTitle>@Path — @Id @Version</PageTitle>
+<PageTitle>@PageTitleText() — @Id @Version</PageTitle>
 
 <nav class="breadcrumb">
     <a href="/">Home</a> /
     <a href="/@Uri.EscapeDataString(Id)">@Id</a> /
     <a href="/@Uri.EscapeDataString(Id)/@Uri.EscapeDataString(Version)">@Version</a> /
-    <strong>@Path</strong>
+    <strong>@PageTitleText()</strong>
 </nav>
 
 <div class="file-layout">
@@ -26,7 +26,8 @@
         <h2 class="sidebar-title">Package contents</h2>
         @if (_tree is not null)
         {
-            <FileTree Node="_tree" OnFileClick="OnFileClick" SelectedPath="@Path" />
+            <FileTree Node="_tree" OnFileClick="OnFileClick"
+                      SelectedPath="@Path" SelectedType="@Type" />
         }
         else if (_error is not null)
         {
@@ -39,8 +40,15 @@
     </aside>
 
     <section class="file-content">
-        <h1>@System.IO.Path.GetFileName(Path)</h1>
-        <p class="muted">@Path · @Id @Version</p>
+        <h1>@PageTitleText()</h1>
+        <p class="muted">
+            @Path
+            @if (!string.IsNullOrEmpty(Type))
+            {
+                <text> · type <code>@Type</code></text>
+            }
+            · @Id @Version
+        </p>
 
         @if (_error is not null)
         {
@@ -50,7 +58,7 @@
         {
             <p>Loading…</p>
         }
-        else if (_kind == FileKind.Markdown && _text is not null)
+        else if (_kind == FileKind.Markdown && _text is not null && string.IsNullOrEmpty(Type))
         {
             <article class="markdown-body">@((MarkupString)Markdown.ToHtml(_text))</article>
         }
@@ -60,7 +68,24 @@
         }
         else if (_kind == FileKind.Assembly)
         {
-            @if (_decompilation is not null)
+            @if (string.IsNullOrEmpty(Type) && _types is { Count: > 0 } && _decompilation is null)
+            {
+                @* Bare .dll URL with no ?type= → show a navigable summary
+                   instead of dumping every type into one giant file. *@
+                <p class="muted">@_types.Count types in this assembly. Pick one from the tree, or:</p>
+                <ul class="type-summary-list">
+                    @foreach (var t in _types)
+                    {
+                        var nsPart = string.IsNullOrEmpty(t.Namespace) ? "(global)" : t.Namespace;
+                        <li>
+                            <a href="javascript:void(0)" @onclick="@(() => NavigateToType(t.ReflectionName))">
+                                <code>@nsPart</code>.<strong>@t.DisplayName</strong>
+                            </a>
+                        </li>
+                    }
+                </ul>
+            }
+            else if (_decompilation is not null)
             {
                 @if (_decompilation.Warnings.Count > 0)
                 {
@@ -87,6 +112,7 @@
     [Parameter] public string Id { get; set; } = string.Empty;
     [Parameter] public string Version { get; set; } = string.Empty;
     [SupplyParameterFromQuery(Name = "path")] public string Path { get; set; } = string.Empty;
+    [SupplyParameterFromQuery(Name = "type")] public string Type { get; set; } = string.Empty;
 
     private bool _loading = true;
     private string? _error;
@@ -97,6 +123,7 @@
     private string? _lengthDescription;
     private FileTreeNode? _tree;
     private bool _shouldHighlight;
+    private IReadOnlyList<TypeSummary>? _types;
 
     // Cap the size of content we hand to Prism so very large generated files
     // (e.g. 1+ MB minified bundles) don't freeze the UI.
@@ -109,6 +136,18 @@
             var lang = LanguageDetector.FromPath(Path);
             return lang is null ? string.Empty : $"language-{lang}";
         }
+    }
+
+    private string PageTitleText()
+    {
+        if (!string.IsNullOrEmpty(Type))
+        {
+            // Show the unqualified type name in the title — full reflection name
+            // is shown in the breadcrumb area below.
+            var dot = Type.LastIndexOf('.');
+            return dot >= 0 ? Type[(dot + 1)..] : Type;
+        }
+        return string.IsNullOrEmpty(Path) ? Id : System.IO.Path.GetFileName(Path);
     }
 
     // Cache the contents tree per (id, version) so re-navigating between files
@@ -143,7 +182,13 @@
 
             if (keyChanged || _tree is null)
             {
-                _tree = FileTreeBuilder.Build(reader.Files);
+                var decomp = new Decompiler();
+                Func<FileEntry, IReadOnlyList<TypeSummary>> typesFor = entry =>
+                {
+                    var r = decomp.ListTypes(reader, entry.Path);
+                    return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+                };
+                _tree = FileTreeBuilder.Build(reader.Files, typesFor);
                 _treeKey = key;
                 StateHasChanged();
             }
@@ -166,13 +211,27 @@
             }
             else if (_kind == FileKind.Assembly)
             {
-                Busy.Update($"Decompiling {Path}…");
-                await Task.Yield();
-                if (ct.IsCancellationRequested) return;
-                var result = new Decompiler().DecompileFromPackage(reader, Path);
-                if (ct.IsCancellationRequested) return;
-                if (result.IsOk) _decompilation = result.Ok;
-                else _decompError = result.Err;
+                var decomp = new Decompiler();
+                if (!string.IsNullOrEmpty(Type))
+                {
+                    Busy.Update($"Decompiling {Type}…");
+                    await Task.Yield();
+                    if (ct.IsCancellationRequested) return;
+                    var result = decomp.DecompileTypeFromPackage(reader, Path, Type);
+                    if (ct.IsCancellationRequested) return;
+                    if (result.IsOk) _decompilation = result.Ok;
+                    else _decompError = result.Err;
+                }
+                else
+                {
+                    // No specific type requested: list types so the user can pick
+                    // one. We deliberately do NOT decompile the whole module here —
+                    // that's exactly the "one giant file" behaviour we replaced.
+                    var listed = decomp.ListTypes(reader, Path);
+                    if (ct.IsCancellationRequested) return;
+                    if (listed.IsOk) _types = listed.Ok;
+                    else _decompError = listed.Err;
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -195,9 +254,9 @@
                     contentLength > 0
                     && contentLength <= MaxHighlightChars
                     && (
-                        (_kind == FileKind.Markdown && _text is not null)                          // README code fences
-                        || (_kind == FileKind.Text && _text is not null && hasLanguage)             // .cs/.json/etc.
-                        || (_kind == FileKind.Assembly && _decompilation is not null)               // decompiled C#
+                        (_kind == FileKind.Markdown && _text is not null && string.IsNullOrEmpty(Type)) // README code fences
+                        || (_kind == FileKind.Text && _text is not null && hasLanguage)                 // .cs/.json/etc.
+                        || (_kind == FileKind.Assembly && _decompilation is not null)                   // decompiled C#
                     );
             }
         }
@@ -236,13 +295,26 @@
         _decompError = null;
         _lengthDescription = null;
         _shouldHighlight = false;
+        _types = null;
     }
 
     private void OnFileClick(FileTreeNode node)
     {
         if (node.IsDirectory) return;
         var p = Uri.EscapeDataString(node.FullPath);
-        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={p}");
+        var url = $"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={p}";
+        if (!string.IsNullOrEmpty(node.TypeFullName))
+        {
+            url += $"&type={Uri.EscapeDataString(node.TypeFullName)}";
+        }
+        Nav.NavigateTo(url);
+    }
+
+    private void NavigateToType(string reflectionName)
+    {
+        var p = Uri.EscapeDataString(Path);
+        var t = Uri.EscapeDataString(reflectionName);
+        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={p}&type={t}");
     }
 
     private static string DecodeText(byte[] bytes)

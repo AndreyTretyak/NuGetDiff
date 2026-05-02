@@ -5,17 +5,42 @@
 <ul class="file-tree @(Root ? "file-tree-root" : "")">
     @foreach (var child in Node.Children)
     {
-        <li class="file-tree-node @(child.IsDirectory ? "is-dir" : "is-file")">
+        <li class="file-tree-node @(child.IsDirectory ? "is-dir" : (child.IsAssemblyContainer ? "is-asm" : "is-file"))">
             @if (child.IsDirectory)
             {
                 <details open>
                     <summary><span class="icon">📁</span> @child.Name</summary>
-                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick" SelectedPath="@SelectedPath" />
+                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick"
+                              SelectedPath="@SelectedPath" SelectedType="@SelectedType" />
+                </details>
+            }
+            else if (child.IsAssemblyContainer)
+            {
+                @* Assembly with type children: expandable + clickable summary
+                   so users can either drill into a single type or open the
+                   whole assembly's "all types" overview. *@
+                <details open>
+                    <summary>
+                        <a class="file-link asm-summary @ChangeClass(child) @(IsSelected(child) ? "selected" : string.Empty)"
+                           href="javascript:void(0)"
+                           @onclick:stopPropagation="true"
+                           @onclick:preventDefault="true"
+                           @onclick="@(() => OnFileClick.InvokeAsync(child))">
+                            <span class="icon">@KindIcon(child)</span>
+                            <span class="name">@child.Name</span>
+                            @if (child.Change is { Kind: var ack } && ack != FileChangeKind.Unchanged)
+                            {
+                                <span class="badge badge-@ack.ToString().ToLowerInvariant()">@BadgeText(ack)</span>
+                            }
+                        </a>
+                    </summary>
+                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick"
+                              SelectedPath="@SelectedPath" SelectedType="@SelectedType" />
                 </details>
             }
             else
             {
-                <a class="file-link @ChangeClass(child) @(IsSelected(child) ? "selected" : string.Empty)"
+                <a class="file-link @(child.TypeFullName is not null ? "is-type" : string.Empty) @ChangeClass(child) @(IsSelected(child) ? "selected" : string.Empty)"
                    href="javascript:void(0)"
                    @onclick="@(() => OnFileClick.InvokeAsync(child))">
                     <span class="icon">@KindIcon(child)</span>
@@ -35,20 +60,34 @@
     [Parameter] public bool Root { get; set; } = true;
     [Parameter] public EventCallback<FileTreeNode> OnFileClick { get; set; }
     [Parameter] public string? SelectedPath { get; set; }
+    [Parameter] public string? SelectedType { get; set; }
 
     private bool IsSelected(FileTreeNode node)
-        => !node.IsDirectory
-           && !string.IsNullOrEmpty(SelectedPath)
-           && string.Equals(node.FullPath, SelectedPath, StringComparison.OrdinalIgnoreCase);
-
-    private static string KindIcon(FileTreeNode node) => node.Entry?.Kind switch
     {
-        FileKind.Markdown => "📝",
-        FileKind.Text => "📄",
-        FileKind.Assembly => "🧩",
-        FileKind.Binary => "📦",
-        _ => "❔",
-    };
+        if (node.IsDirectory) return false;
+        if (string.IsNullOrEmpty(SelectedPath)) return false;
+        if (!string.Equals(node.FullPath, SelectedPath, StringComparison.OrdinalIgnoreCase)) return false;
+
+        // Path matches. The node is selected iff its TypeFullName matches the
+        // current SelectedType (both null = whole-file view; both equal = the
+        // exact type the user is looking at).
+        var nodeType = node.TypeFullName ?? string.Empty;
+        var selType = SelectedType ?? string.Empty;
+        return string.Equals(nodeType, selType, StringComparison.Ordinal);
+    }
+
+    private static string KindIcon(FileTreeNode node)
+    {
+        if (node.TypeFullName is not null) return "🔹";
+        return node.Entry?.Kind switch
+        {
+            FileKind.Markdown => "📝",
+            FileKind.Text => "📄",
+            FileKind.Assembly => "🧩",
+            FileKind.Binary => "📦",
+            _ => "❔",
+        };
+    }
 
     private static string ChangeClass(FileTreeNode node) => node.Change?.Kind switch
     {

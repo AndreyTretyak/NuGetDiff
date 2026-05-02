@@ -97,4 +97,57 @@ public class DifferTests
         var diff = new Differ().DiffFile(oldR, newR, "runtimes/win-x64/native/native.dll");
         Assert.Equal(FileDiffKind.Binary, diff.Kind);
     }
+
+    [Fact]
+    public void DiffType_diffs_a_single_named_type_across_versions()
+    {
+        // Same managed assembly on both sides — the per-type diff should still
+        // succeed and produce identical text (no inserted/deleted lines).
+        var asm = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var oldBytes = TestPackageBuilder.Build(
+            "Real", "1.0.0",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", asm) });
+        var newBytes = TestPackageBuilder.Build(
+            "Real", "1.0.1",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", asm) });
+
+        using var oldR = new PackageReader(new MemoryStream(oldBytes));
+        using var newR = new PackageReader(new MemoryStream(newBytes));
+
+        var diff = new Differ().DiffType(
+            oldR, newR,
+            "lib/net8.0/NuGetDiff.Core.dll",
+            "NuGetDiff.Core.Models.PackageDescriptor");
+
+        Assert.Equal(FileDiffKind.Assembly, diff.Kind);
+        Assert.NotNull(diff.Text);
+        // Identical content on both sides → no inserted/deleted lines.
+        Assert.DoesNotContain(diff.Text!.Old, l => l.Kind == DiffLineKind.Deleted);
+        Assert.DoesNotContain(diff.Text!.New, l => l.Kind == DiffLineKind.Inserted);
+    }
+
+    [Fact]
+    public void DiffType_reports_message_when_type_missing_on_one_side()
+    {
+        var asm = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var oldBytes = TestPackageBuilder.Build(
+            "Real", "1.0.0",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", asm) });
+        var newBytes = TestPackageBuilder.Build(
+            "Real", "1.0.1",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", asm) });
+
+        using var oldR = new PackageReader(new MemoryStream(oldBytes));
+        using var newR = new PackageReader(new MemoryStream(newBytes));
+
+        var diff = new Differ().DiffType(
+            oldR, newR,
+            "lib/net8.0/NuGetDiff.Core.dll",
+            "Does.Not.Exist.Type");
+
+        Assert.Equal(FileDiffKind.Assembly, diff.Kind);
+        // Both sides fail to find the type → text is null and message explains.
+        Assert.Null(diff.Text);
+        Assert.False(string.IsNullOrEmpty(diff.Message));
+    }
 }

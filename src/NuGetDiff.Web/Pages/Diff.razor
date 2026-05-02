@@ -1,4 +1,5 @@
 @page "/{id}/{v1}/{v2}"
+@using NuGetDiff.Core.Decompilation
 @using NuGetDiff.Core.Diffing
 @using NuGetDiff.Core.Models
 @using NuGetDiff.Core.Packages
@@ -41,9 +42,10 @@ else
         <span class="muted">(unchanged not shown)</span>
     </p>
 
-    var changedOnly = _diff.Changes.Where(c => c.Kind != FileChangeKind.Unchanged).ToList();
-    var tree = FileTreeBuilder.BuildFromChanges(changedOnly);
-    <FileTree Node="tree" OnFileClick="OnFileClick" />
+    @if (_tree is not null)
+    {
+        <FileTree Node="_tree" OnFileClick="OnFileClick" />
+    }
 }
 
 @code {
@@ -52,12 +54,14 @@ else
     [Parameter] public string V2 { get; set; } = string.Empty;
 
     private TreeDiff? _diff;
+    private FileTreeNode? _tree;
     private string? _error;
 
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
         _diff = null;
+        _tree = null;
         _error = null;
         StateHasChanged();
         using var _ = Busy.Begin($"Loading {Id} {V1} and {V2}…");
@@ -77,6 +81,22 @@ else
             if (ct.IsCancellationRequested) return;
             var diff = new Differ().DiffTree(oldR, newR);
             if (ct.IsCancellationRequested) return;
+
+            // Build the tree while readers are alive — listing types requires
+            // loading each PE file.
+            var changedOnly = diff.Changes.Where(c => c.Kind != FileChangeKind.Unchanged).ToList();
+            var decomp = new Decompiler();
+            Func<FileEntry, IReadOnlyList<TypeSummary>> typesForOld = entry =>
+            {
+                var r = decomp.ListTypes(oldR, entry.Path);
+                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+            };
+            Func<FileEntry, IReadOnlyList<TypeSummary>> typesForNew = entry =>
+            {
+                var r = decomp.ListTypes(newR, entry.Path);
+                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+            };
+            _tree = FileTreeBuilder.BuildFromChanges(changedOnly, typesForOld, typesForNew);
             _diff = diff;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -94,6 +114,11 @@ else
     {
         if (node.IsDirectory) return;
         var path = Uri.EscapeDataString(node.FullPath);
-        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(V1)}/{Uri.EscapeDataString(V2)}/file?path={path}");
+        var url = $"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(V1)}/{Uri.EscapeDataString(V2)}/file?path={path}";
+        if (!string.IsNullOrEmpty(node.TypeFullName))
+        {
+            url += $"&type={Uri.EscapeDataString(node.TypeFullName)}";
+        }
+        Nav.NavigateTo(url);
     }
 }

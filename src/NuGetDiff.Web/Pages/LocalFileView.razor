@@ -7,17 +7,25 @@
 @inject PackageResolver Resolver
 @inject BusyState Busy
 @inject MarkdownRenderer Markdown
+@inject NavigationManager Nav
 
-<PageTitle>@Path</PageTitle>
+<PageTitle>@PageTitleText()</PageTitle>
 
 <nav class="breadcrumb">
     <a href="/">Home</a> /
     <a href="/local/@Hash">local upload</a> /
-    <strong>@Path</strong>
+    <strong>@PageTitleText()</strong>
 </nav>
 
-<h1>@System.IO.Path.GetFileName(Path)</h1>
-<p class="muted">@Path · local upload</p>
+<h1>@PageTitleText()</h1>
+<p class="muted">
+    @Path
+    @if (!string.IsNullOrEmpty(Type))
+    {
+        <text> · type <code>@Type</code></text>
+    }
+    · local upload
+</p>
 
 @if (_error is not null)
 {
@@ -27,7 +35,7 @@ else if (_loading)
 {
     <p>Loading…</p>
 }
-else if (_kind == FileKind.Markdown && _text is not null)
+else if (_kind == FileKind.Markdown && _text is not null && string.IsNullOrEmpty(Type))
 {
     <article class="markdown-body">@((MarkupString)Markdown.ToHtml(_text))</article>
 }
@@ -37,7 +45,22 @@ else if ((_kind == FileKind.Text) && _text is not null)
 }
 else if (_kind == FileKind.Assembly)
 {
-    @if (_decompilation is not null)
+    @if (string.IsNullOrEmpty(Type) && _types is { Count: > 0 } && _decompilation is null)
+    {
+        <p class="muted">@_types.Count types in this assembly. Pick one:</p>
+        <ul class="type-summary-list">
+            @foreach (var t in _types)
+            {
+                var nsPart = string.IsNullOrEmpty(t.Namespace) ? "(global)" : t.Namespace;
+                <li>
+                    <a href="javascript:void(0)" @onclick="@(() => NavigateToType(t.ReflectionName))">
+                        <code>@nsPart</code>.<strong>@t.DisplayName</strong>
+                    </a>
+                </li>
+            }
+        </ul>
+    }
+    else if (_decompilation is not null)
     {
         @if (_decompilation.Warnings.Count > 0)
         {
@@ -61,6 +84,7 @@ else if (_kind == FileKind.Binary)
 @code {
     [Parameter] public string Hash { get; set; } = string.Empty;
     [SupplyParameterFromQuery(Name = "path")] public string Path { get; set; } = string.Empty;
+    [SupplyParameterFromQuery(Name = "type")] public string Type { get; set; } = string.Empty;
 
     private bool _loading = true;
     private string? _error;
@@ -69,6 +93,17 @@ else if (_kind == FileKind.Binary)
     private DecompilationResult? _decompilation;
     private DecompilationError? _decompError;
     private string? _lengthDescription;
+    private IReadOnlyList<TypeSummary>? _types;
+
+    private string PageTitleText()
+    {
+        if (!string.IsNullOrEmpty(Type))
+        {
+            var dot = Type.LastIndexOf('.');
+            return dot >= 0 ? Type[(dot + 1)..] : Type;
+        }
+        return string.IsNullOrEmpty(Path) ? "Local file" : System.IO.Path.GetFileName(Path);
+    }
 
     protected override async Task OnParametersSetAsync()
     {
@@ -79,6 +114,7 @@ else if (_kind == FileKind.Binary)
         _text = null;
         _decompilation = null;
         _decompError = null;
+        _types = null;
         StateHasChanged();
         if (string.IsNullOrEmpty(Path))
         {
@@ -107,13 +143,24 @@ else if (_kind == FileKind.Binary)
             }
             else if (_kind == FileKind.Assembly)
             {
-                Busy.Update($"Decompiling {Path}…");
-                await Task.Yield();
-                if (ct.IsCancellationRequested) return;
-                var result = new Decompiler().DecompileFromPackage(reader, Path);
-                if (ct.IsCancellationRequested) return;
-                if (result.IsOk) _decompilation = result.Ok;
-                else _decompError = result.Err;
+                var decomp = new Decompiler();
+                if (!string.IsNullOrEmpty(Type))
+                {
+                    Busy.Update($"Decompiling {Type}…");
+                    await Task.Yield();
+                    if (ct.IsCancellationRequested) return;
+                    var result = decomp.DecompileTypeFromPackage(reader, Path, Type);
+                    if (ct.IsCancellationRequested) return;
+                    if (result.IsOk) _decompilation = result.Ok;
+                    else _decompError = result.Err;
+                }
+                else
+                {
+                    var listed = decomp.ListTypes(reader, Path);
+                    if (ct.IsCancellationRequested) return;
+                    if (listed.IsOk) _types = listed.Ok;
+                    else _decompError = listed.Err;
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -129,6 +176,13 @@ else if (_kind == FileKind.Binary)
         {
             if (!ct.IsCancellationRequested) _loading = false;
         }
+    }
+
+    private void NavigateToType(string reflectionName)
+    {
+        var p = Uri.EscapeDataString(Path);
+        var t = Uri.EscapeDataString(reflectionName);
+        Nav.NavigateTo($"/local/{Hash}/file?path={p}&type={t}");
     }
 
     private static string DecodeText(byte[] bytes)

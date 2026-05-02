@@ -221,9 +221,19 @@ h3 { font-size: 1.05rem; }
 .file-tree-node { margin: 0.05rem 0; }
 .file-tree details summary { cursor: pointer; }
 .file-tree details summary .icon { margin-right: 0.3rem; }
+/* Hybrid summary: an assembly node that is also clickable. The summary holds a
+   real <a> rather than just text, so we strip the default summary list-marker
+   spacing override and align with file rows. */
+.file-tree details > summary > .file-link.asm-summary {
+    display: inline-flex;
+}
+.file-tree-node.is-asm > details > summary { padding-left: 0; }
 .file-link { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--color-text); padding: 0.05rem 0.25rem; border-radius: 4px; }
 .file-link:hover { background: var(--color-imaginary-bg); text-decoration: none; }
 .file-link .name { font-family: var(--font-mono); font-size: 0.9rem; }
+/* Type leaves render slightly indented and with the type accent colour. */
+.file-link.is-type .name { color: var(--color-text); }
+.file-link.is-type .icon { opacity: 0.85; }
 .file-link.change-added { color: var(--color-added-fg); }
 .file-link.change-removed { color: var(--color-removed-fg); }
 .file-link.change-modified { color: var(--color-modified-fg); }
@@ -282,6 +292,25 @@ h3 { font-size: 1.05rem; }
 
 .diff-summary { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }
 .diff-summary .badge { font-size: 0.85rem; padding: 0.15em 0.5em; }
+
+/* "Pick a type" landing list shown on a bare ?path=foo.dll URL. */
+.type-summary-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 0.5rem 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.25rem 0.75rem;
+}
+.type-summary-list li { margin: 0; }
+.type-summary-list a {
+    display: inline-block;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    color: var(--color-text);
+}
+.type-summary-list a:hover { background: var(--color-imaginary-bg); text-decoration: none; }
+.type-summary-list code { font-size: 0.85rem; color: var(--color-muted, #57606a); }
 
 .code-view {
     background: var(--color-surface);

@@ -35,38 +35,12 @@ public sealed class Decompiler
     /// </summary>
     public OneOf<DecompilationResult, DecompilationError> DecompileFromPackage(PackageReader package, string path)
     {
-        if (!package.ContainsFile(path))
-        {
-            return new DecompilationError($"File '{path}' not found in package.");
-        }
+        var loaded = LoadAssembly(package, path);
+        if (!loaded.IsOk) return loaded.Err!;
 
-        byte[] bytes;
+        var (pe, resolver, _) = loaded.Ok!;
         try
         {
-            bytes = package.ReadFileBytes(path);
-        }
-        catch (Exception ex)
-        {
-            return new DecompilationError("Failed to read file from package.", ex.Message);
-        }
-
-        // Cheap pre-flight: avoid invoking the decompiler on native PEs and other non-managed binaries.
-        using (var probe = new MemoryStream(bytes, writable: false))
-        {
-            if (!FileClassifier.IsManagedAssembly(probe, leaveOpen: false))
-            {
-                return new DecompilationError(
-                    "File is not a managed .NET assembly.",
-                    "It may be a native binary, a resource file, or otherwise not contain CLR metadata.");
-            }
-        }
-
-        try
-        {
-            var stream = new MemoryStream(bytes, writable: false);
-            using var pe = new PEFile(path, stream);
-            using var resolver = new PackageAssemblyResolver(package, GetFolder(path));
-
             var decompiler = new CSharpDecompiler(pe, resolver, _settings);
             var csharp = decompiler.DecompileWholeModuleAsString();
 
@@ -96,6 +70,197 @@ public sealed class Decompiler
         catch (Exception ex)
         {
             return new DecompilationError("Decompilation failed.", ex.Message);
+        }
+        finally
+        {
+            pe.Dispose();
+            resolver.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Decompiles a single named type (and its nested types) from the assembly at
+    /// <paramref name="path"/>. The <paramref name="reflectionName"/> is the same string
+    /// returned by <see cref="ListTypes"/> (e.g. <c>Newtonsoft.Json.JsonConvert</c> or
+    /// <c>Newtonsoft.Json.JsonConverter`1</c>).
+    /// </summary>
+    public OneOf<DecompilationResult, DecompilationError> DecompileTypeFromPackage(
+        PackageReader package, string path, string reflectionName)
+    {
+        if (string.IsNullOrEmpty(reflectionName))
+        {
+            return new DecompilationError("No type name was supplied.");
+        }
+
+        var loaded = LoadAssembly(package, path);
+        if (!loaded.IsOk) return loaded.Err!;
+
+        var (pe, resolver, _) = loaded.Ok!;
+        try
+        {
+            FullTypeName fullName;
+            try
+            {
+                fullName = new FullTypeName(reflectionName);
+            }
+            catch (Exception ex)
+            {
+                return new DecompilationError($"Invalid type name '{reflectionName}'.", ex.Message);
+            }
+
+            var decompiler = new CSharpDecompiler(pe, resolver, _settings);
+
+            // Verify the type is actually defined in this module before asking ILSpy
+            // to decompile it — otherwise we get a confusing inner-exception.
+            var found = false;
+            foreach (var handle in pe.Metadata.GetTopLevelTypeDefinitions())
+            {
+                if (string.Equals(
+                        handle.GetFullTypeName(pe.Metadata).ReflectionName,
+                        reflectionName,
+                        StringComparison.Ordinal))
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                return new DecompilationError($"Type '{reflectionName}' was not found in {path}.");
+            }
+
+            var csharp = decompiler.DecompileTypeAsString(fullName);
+
+            var warnings = resolver.UnresolvedReferences
+                .Select(name => $"Unresolved reference: {name}")
+                .ToList();
+
+            return new DecompilationResult(
+                csharp,
+                warnings,
+                new[] { reflectionName },
+                SafeAssemblyName(pe),
+                ExtractTfm(path));
+        }
+        catch (Exception ex)
+        {
+            return new DecompilationError($"Decompilation of '{reflectionName}' failed.", ex.Message);
+        }
+        finally
+        {
+            pe.Dispose();
+            resolver.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Lists the top-level types in the assembly at <paramref name="path"/> without
+    /// decompiling. Compiler-generated types (those whose name starts with <c>&lt;</c>,
+    /// such as <c>&lt;Module&gt;</c> or <c>&lt;PrivateImplementationDetails&gt;</c>) are
+    /// filtered out so the navigation tree shows only meaningful entries.
+    /// </summary>
+    public OneOf<TypeSummary[], DecompilationError> ListTypes(PackageReader package, string path)
+    {
+        var loaded = LoadAssembly(package, path);
+        if (!loaded.IsOk) return loaded.Err!;
+
+        var (pe, resolver, _) = loaded.Ok!;
+        try
+        {
+            var result = new List<TypeSummary>();
+            foreach (var handle in pe.Metadata.GetTopLevelTypeDefinitions())
+            {
+                TypeSummary? summary;
+                try
+                {
+                    summary = TryBuildSummary(handle, pe.Metadata);
+                }
+                catch
+                {
+                    summary = null;
+                }
+                if (summary is not null) result.Add(summary);
+            }
+            result.Sort(static (a, b) =>
+            {
+                var ns = StringComparer.Ordinal.Compare(a.Namespace, b.Namespace);
+                return ns != 0 ? ns : StringComparer.Ordinal.Compare(a.ReflectionName, b.ReflectionName);
+            });
+            return result.ToArray();
+        }
+        catch (Exception ex)
+        {
+            return new DecompilationError("Failed to list types.", ex.Message);
+        }
+        finally
+        {
+            pe.Dispose();
+            resolver.Dispose();
+        }
+    }
+
+    private static TypeSummary? TryBuildSummary(
+        System.Reflection.Metadata.TypeDefinitionHandle handle,
+        System.Reflection.Metadata.MetadataReader metadata)
+    {
+        var fullName = handle.GetFullTypeName(metadata);
+        var topLevel = fullName.TopLevelTypeName;
+        var rawName = topLevel.Name;
+        // Skip compiler-generated / unspeakable types.
+        if (string.IsNullOrEmpty(rawName)) return null;
+        if (rawName[0] == '<') return null;
+
+        var reflectionName = fullName.ReflectionName;
+        var arity = topLevel.TypeParameterCount;
+        var displayName = arity > 0
+            ? $"{rawName}<{new string(',', arity - 1)}>"
+            : rawName;
+
+        return new TypeSummary(
+            ReflectionName: reflectionName,
+            Namespace: topLevel.Namespace ?? string.Empty,
+            DisplayName: displayName);
+    }
+
+    private OneOf<(PEFile pe, PackageAssemblyResolver resolver, byte[] bytes), DecompilationError> LoadAssembly(
+        PackageReader package, string path)
+    {
+        if (!package.ContainsFile(path))
+        {
+            return new DecompilationError($"File '{path}' not found in package.");
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = package.ReadFileBytes(path);
+        }
+        catch (Exception ex)
+        {
+            return new DecompilationError("Failed to read file from package.", ex.Message);
+        }
+
+        // Cheap pre-flight: avoid invoking the decompiler on native PEs and other non-managed binaries.
+        using (var probe = new MemoryStream(bytes, writable: false))
+        {
+            if (!FileClassifier.IsManagedAssembly(probe, leaveOpen: false))
+            {
+                return new DecompilationError(
+                    "File is not a managed .NET assembly.",
+                    "It may be a native binary, a resource file, or otherwise not contain CLR metadata.");
+            }
+        }
+
+        try
+        {
+            var stream = new MemoryStream(bytes, writable: false);
+            var pe = new PEFile(path, stream);
+            var resolver = new PackageAssemblyResolver(package, GetFolder(path));
+            return (pe, resolver, bytes);
+        }
+        catch (Exception ex)
+        {
+            return new DecompilationError("Failed to open assembly.", ex.Message);
         }
     }
 

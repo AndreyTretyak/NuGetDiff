@@ -1,4 +1,5 @@
 @page "/{id}/{v1}/{v2}/file"
+@using NuGetDiff.Core.Decompilation
 @using NuGetDiff.Core.Diffing
 @using NuGetDiff.Core.Models
 @using NuGetDiff.Core.Packages
@@ -11,13 +12,13 @@
 @inject NavigationManager Nav
 @inject IJSRuntime JS
 
-<PageTitle>@Path — @Id @V1 → @V2</PageTitle>
+<PageTitle>@PageTitleText() — @Id @V1 → @V2</PageTitle>
 
 <nav class="breadcrumb">
     <a href="/">Home</a> /
     <a href="/@Uri.EscapeDataString(Id)">@Id</a> /
     <a href="/@Uri.EscapeDataString(Id)/@Uri.EscapeDataString(V1)/@Uri.EscapeDataString(V2)">@V1 → @V2</a> /
-    <strong>@Path</strong>
+    <strong>@PageTitleText()</strong>
 </nav>
 
 <div class="file-layout">
@@ -25,7 +26,8 @@
         <h2 class="sidebar-title">Changed files</h2>
         @if (_tree is not null)
         {
-            <FileTree Node="_tree" OnFileClick="OnFileClick" SelectedPath="@Path" />
+            <FileTree Node="_tree" OnFileClick="OnFileClick"
+                      SelectedPath="@Path" SelectedType="@Type" />
         }
         else if (_error is not null)
         {
@@ -38,8 +40,15 @@
     </aside>
 
     <section class="file-content">
-        <h1>@System.IO.Path.GetFileName(Path)</h1>
-        <p class="muted">@Path · @Id @V1 → @V2</p>
+        <h1>@PageTitleText()</h1>
+        <p class="muted">
+            @Path
+            @if (!string.IsNullOrEmpty(Type))
+            {
+                <text> · type <code>@Type</code></text>
+            }
+            · @Id @V1 → @V2
+        </p>
 
         @if (_error is not null)
         {
@@ -93,6 +102,7 @@
     [Parameter] public string V1 { get; set; } = string.Empty;
     [Parameter] public string V2 { get; set; } = string.Empty;
     [SupplyParameterFromQuery(Name = "path")] public string Path { get; set; } = string.Empty;
+    [SupplyParameterFromQuery(Name = "type")] public string Type { get; set; } = string.Empty;
 
     private FileDiff? _diff;
     private FileTreeNode? _tree;
@@ -109,6 +119,16 @@
     // same comparison doesn't redownload and rediff the whole pair every time.
     private string _treeKey = string.Empty;
 
+    private string PageTitleText()
+    {
+        if (!string.IsNullOrEmpty(Type))
+        {
+            var dot = Type.LastIndexOf('.');
+            return dot >= 0 ? Type[(dot + 1)..] : Type;
+        }
+        return string.IsNullOrEmpty(Path) ? Id : System.IO.Path.GetFileName(Path);
+    }
+
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
@@ -121,7 +141,8 @@
         _diff = null;
         _error = null;
         _loading = true;
-        _language = LanguageDetector.FromPath(Path);
+        // For per-type diffs the language is always C# regardless of file extension.
+        _language = !string.IsNullOrEmpty(Type) ? "csharp" : LanguageDetector.FromPath(Path);
         _shouldHighlight = false;
         StateHasChanged();
         if (string.IsNullOrEmpty(Path))
@@ -154,15 +175,28 @@
                 var changedOnly = treeDiff.Changes
                     .Where(c => c.Kind != FileChangeKind.Unchanged)
                     .ToList();
-                _tree = FileTreeBuilder.BuildFromChanges(changedOnly);
+                var decomp = new Decompiler();
+                Func<FileEntry, IReadOnlyList<TypeSummary>> typesForOld = entry =>
+                {
+                    var r = decomp.ListTypes(oldR, entry.Path);
+                    return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+                };
+                Func<FileEntry, IReadOnlyList<TypeSummary>> typesForNew = entry =>
+                {
+                    var r = decomp.ListTypes(newR, entry.Path);
+                    return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+                };
+                _tree = FileTreeBuilder.BuildFromChanges(changedOnly, typesForOld, typesForNew);
                 _treeKey = key;
                 StateHasChanged();
             }
 
-            Busy.Update($"Computing diff for {Path}…");
+            Busy.Update($"Computing diff for {(string.IsNullOrEmpty(Type) ? Path : Type)}…");
             await Task.Yield();
             if (ct.IsCancellationRequested) return;
-            var diff = new Differ().DiffFile(oldR, newR, Path);
+            var diff = !string.IsNullOrEmpty(Type)
+                ? new Differ().DiffType(oldR, newR, Path, Type)
+                : new Differ().DiffFile(oldR, newR, Path);
             if (ct.IsCancellationRequested) return;
             _diff = diff;
         }
@@ -217,6 +251,11 @@
     {
         if (node.IsDirectory) return;
         var p = Uri.EscapeDataString(node.FullPath);
-        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(V1)}/{Uri.EscapeDataString(V2)}/file?path={p}");
+        var url = $"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(V1)}/{Uri.EscapeDataString(V2)}/file?path={p}";
+        if (!string.IsNullOrEmpty(node.TypeFullName))
+        {
+            url += $"&type={Uri.EscapeDataString(node.TypeFullName)}";
+        }
+        Nav.NavigateTo(url);
     }
 }

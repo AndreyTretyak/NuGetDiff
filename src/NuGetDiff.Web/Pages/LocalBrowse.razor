@@ -1,4 +1,5 @@
 @page "/local/{hash}"
+@using NuGetDiff.Core.Decompilation
 @using NuGetDiff.Core.Models
 @using NuGetDiff.Core.Packages
 @using NuGetDiff.Web.Components
@@ -32,20 +33,24 @@ else
     }
 
     <h2>Contents (@_contents.Files.Count files)</h2>
-    var tree = FileTreeBuilder.Build(_contents.Files);
-    <FileTree Node="tree" OnFileClick="OnFileClick" />
+    @if (_tree is not null)
+    {
+        <FileTree Node="_tree" OnFileClick="OnFileClick" />
+    }
 }
 
 @code {
     [Parameter] public string Hash { get; set; } = string.Empty;
 
     private PackageContents? _contents;
+    private FileTreeNode? _tree;
     private string? _error;
 
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
         _contents = null;
+        _tree = null;
         _error = null;
         StateHasChanged();
         using var _ = Busy.Begin("Loading uploaded package…");
@@ -61,6 +66,14 @@ else
             using var reader = new PackageReader(stream);
             var contents = reader.Read();
             if (ct.IsCancellationRequested) return;
+
+            var decomp = new Decompiler();
+            Func<FileEntry, IReadOnlyList<TypeSummary>> typesFor = entry =>
+            {
+                var r = decomp.ListTypes(reader, entry.Path);
+                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+            };
+            _tree = FileTreeBuilder.Build(contents.Files, typesFor);
             _contents = contents;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -78,6 +91,11 @@ else
     {
         if (node.IsDirectory) return;
         var path = Uri.EscapeDataString(node.FullPath);
-        Nav.NavigateTo($"/local/{Hash}/file?path={path}");
+        var url = $"/local/{Hash}/file?path={path}";
+        if (!string.IsNullOrEmpty(node.TypeFullName))
+        {
+            url += $"&type={Uri.EscapeDataString(node.TypeFullName)}";
+        }
+        Nav.NavigateTo(url);
     }
 }

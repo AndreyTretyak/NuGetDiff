@@ -1,4 +1,5 @@
 @page "/{id}/{version}"
+@using NuGetDiff.Core.Decompilation
 @using NuGetDiff.Core.Models
 @using NuGetDiff.Core.Packages
 @using NuGetDiff.Web.Components
@@ -81,10 +82,10 @@ else
 
     <section class="files">
         <h2>Contents (@_contents.Files.Count files)</h2>
-        @{
-            var tree = FileTreeBuilder.Build(_contents.Files);
+        @if (_tree is not null)
+        {
+            <FileTree Node="_tree" OnFileClick="OnFileClick" />
         }
-        <FileTree Node="tree" OnFileClick="OnFileClick" />
     </section>
 }
 
@@ -93,12 +94,14 @@ else
     [Parameter] public string Version { get; set; } = string.Empty;
 
     private PackageContents? _contents;
+    private FileTreeNode? _tree;
     private string? _error;
 
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
         _contents = null;
+        _tree = null;
         _error = null;
         StateHasChanged();
         using var _ = Busy.Begin($"Loading {Id} {Version}…");
@@ -114,6 +117,16 @@ else
             using var reader = new PackageReader(stream);
             var contents = reader.Read();
             if (ct.IsCancellationRequested) return;
+
+            // Build the tree while the reader is still alive — listing types
+            // requires loading each PE file.
+            var decomp = new Decompiler();
+            Func<FileEntry, IReadOnlyList<TypeSummary>> typesFor = entry =>
+            {
+                var r = decomp.ListTypes(reader, entry.Path);
+                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
+            };
+            _tree = FileTreeBuilder.Build(contents.Files, typesFor);
             _contents = contents;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -131,6 +144,11 @@ else
     {
         if (node.IsDirectory) return;
         var path = Uri.EscapeDataString(node.FullPath);
-        Nav.NavigateTo($"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={path}");
+        var url = $"/{Uri.EscapeDataString(Id)}/{Uri.EscapeDataString(Version)}/file?path={path}";
+        if (!string.IsNullOrEmpty(node.TypeFullName))
+        {
+            url += $"&type={Uri.EscapeDataString(node.TypeFullName)}";
+        }
+        Nav.NavigateTo(url);
     }
 }

@@ -173,6 +173,52 @@ public sealed class Differ
             string.Equals(oldHash, newHash, StringComparison.Ordinal) ? "Identical." : "Binary differs.");
     }
 
+    /// <summary>
+    /// Diffs a single named type within an assembly across two packages. Either side
+    /// may be missing (returns the present side as text-only) or fail to decompile (returns
+    /// a <see cref="FileDiffKind.Assembly"/> diff with a populated <c>Message</c>).
+    /// </summary>
+    public FileDiff DiffType(PackageReader oldPkg, PackageReader newPkg, string assemblyPath, string typeReflectionName)
+    {
+        var oldExists = oldPkg.ContainsFile(assemblyPath);
+        var newExists = newPkg.ContainsFile(assemblyPath);
+        if (!oldExists && !newExists)
+        {
+            return new FileDiff(FileDiffKind.Unsupported, null, null, null, null, null,
+                $"Assembly '{assemblyPath}' not found in either version.");
+        }
+
+        var oldEntry = oldExists ? oldPkg.Files.First(f => string.Equals(f.Path, assemblyPath, StringComparison.OrdinalIgnoreCase)) : null;
+        var newEntry = newExists ? newPkg.Files.First(f => string.Equals(f.Path, assemblyPath, StringComparison.OrdinalIgnoreCase)) : null;
+
+        string? oldCs = null;
+        string? newCs = null;
+        string? message = null;
+
+        if (oldExists)
+        {
+            var r = _decompiler.DecompileTypeFromPackage(oldPkg, assemblyPath, typeReflectionName);
+            if (r.IsOk) { oldCs = r.Ok!.CSharp; }
+            else { message = "Old: " + r.Err!.Message; }
+        }
+        if (newExists)
+        {
+            var r = _decompiler.DecompileTypeFromPackage(newPkg, assemblyPath, typeReflectionName);
+            if (r.IsOk) { newCs = r.Ok!.CSharp; }
+            else { message = ((message is null) ? "New: " : message + " | New: ") + r.Err!.Message; }
+        }
+
+        if (oldCs is null && newCs is null)
+        {
+            return new FileDiff(
+                FileDiffKind.Assembly, null, null, null, oldEntry?.Length, newEntry?.Length,
+                message ?? $"Could not decompile '{typeReflectionName}' on either side.");
+        }
+
+        var sbs = BuildSideBySide(oldCs ?? string.Empty, newCs ?? string.Empty);
+        return new FileDiff(FileDiffKind.Assembly, sbs, null, null, oldEntry?.Length, newEntry?.Length, message);
+    }
+
     private SideBySideDiff BuildSideBySide(string oldText, string newText)
     {
         var model = _diff.BuildDiffModel(oldText, newText, ignoreWhitespace: false);

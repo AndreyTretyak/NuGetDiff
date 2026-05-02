@@ -56,4 +56,70 @@ public class DecompilerTests
         Assert.False(result.IsOk);
         Assert.Contains("not found", result.Err!.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void Lists_top_level_types_without_compiler_generated()
+    {
+        var realAsm = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var bytes = TestPackageBuilder.Build(
+            "Real",
+            "1.0.0",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", realAsm) });
+
+        using var reader = new PackageReader(new MemoryStream(bytes));
+        var result = new Decompiler().ListTypes(reader, "lib/net8.0/NuGetDiff.Core.dll");
+
+        Assert.True(result.IsOk, $"expected success, got error: {result.Err?.Message}");
+        var types = result.Ok!;
+        Assert.NotEmpty(types);
+
+        // Real types are present.
+        Assert.Contains(types, t => t.ReflectionName == "NuGetDiff.Core.Models.PackageDescriptor");
+
+        // No compiler-generated types should slip through.
+        Assert.DoesNotContain(types, t => t.DisplayName.StartsWith("<", StringComparison.Ordinal));
+        Assert.DoesNotContain(types, t => t.ReflectionName.Contains("<Module>", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Decompiles_a_single_named_type()
+    {
+        var realAsm = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var bytes = TestPackageBuilder.Build(
+            "Real",
+            "1.0.0",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", realAsm) });
+
+        using var reader = new PackageReader(new MemoryStream(bytes));
+        var d = new Decompiler();
+        var result = d.DecompileTypeFromPackage(
+            reader,
+            "lib/net8.0/NuGetDiff.Core.dll",
+            "NuGetDiff.Core.Models.PackageDescriptor");
+
+        Assert.True(result.IsOk, $"expected success, got error: {result.Err?.Message}");
+        var cs = result.Ok!.CSharp;
+        Assert.Contains("PackageDescriptor", cs);
+        // Per-type decompile should NOT include unrelated types from the assembly.
+        Assert.DoesNotContain("class Decompiler", cs);
+    }
+
+    [Fact]
+    public void Returns_error_for_unknown_type()
+    {
+        var realAsm = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var bytes = TestPackageBuilder.Build(
+            "Real",
+            "1.0.0",
+            new[] { new TestPackageBuilder.FileSpec("lib/net8.0/NuGetDiff.Core.dll", realAsm) });
+
+        using var reader = new PackageReader(new MemoryStream(bytes));
+        var result = new Decompiler().DecompileTypeFromPackage(
+            reader,
+            "lib/net8.0/NuGetDiff.Core.dll",
+            "Does.Not.Exist.Type");
+
+        Assert.False(result.IsOk);
+        Assert.Contains("not found", result.Err!.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }
