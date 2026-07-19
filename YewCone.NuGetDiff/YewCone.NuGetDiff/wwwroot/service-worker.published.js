@@ -8,21 +8,34 @@ self.addEventListener('fetch', event => event.respondWith(onFetch(event)));
 
 const cacheNamePrefix = 'offline-cache-';
 const cacheName = `${cacheNamePrefix}${self.assetsManifest.version}`;
-const offlineAssetsInclude = [ /\.dll$/, /\.pdb$/, /\.wasm/, /\.html/, /\.js$/, /\.json$/, /\.css$/, /\.woff$/, /\.png$/, /\.jpe?g$/, /\.gif$/, /\.ico$/, /\.blat$/, /\.dat$/ ];
-const offlineAssetsExclude = [ /^service-worker\.js$/ ];
+const appShellAssets = new Set([
+    'index.html',
+    'css/app.css',
+    'favicon.png',
+    'icon-192.png',
+    'icon-512.png',
+    'manifest.webmanifest'
+]);
+const offlineAssetsExclude = [ /^service-worker\.js$/, /\.(?:br|gz|map|pdb|symbols)$/ ];
 
 // Replace with your base path if you are hosting on a subfolder. Ensure there is a trailing '/'.
 const base = "/";
 const baseUrl = new URL(base, self.origin);
 const manifestUrlList = self.assetsManifest.assets.map(asset => new URL(asset.url, baseUrl).href);
 
+function shouldCacheAsset(asset) {
+    const url = asset.url.replace(/^\.\//, '');
+    const isFrameworkAsset = url.startsWith('_framework/');
+    const isExcluded = offlineAssetsExclude.some(pattern => pattern.test(url));
+
+    return !isExcluded && (isFrameworkAsset || appShellAssets.has(url));
+}
+
 async function onInstall(event) {
     console.info('Service worker: Install');
 
-    // Fetch and cache all matching items from the assets manifest
     const assetsRequests = self.assetsManifest.assets
-        .filter(asset => offlineAssetsInclude.some(pattern => pattern.test(asset.url)))
-        .filter(asset => !offlineAssetsExclude.some(pattern => pattern.test(asset.url)))
+        .filter(shouldCacheAsset)
         .map(asset => new Request(asset.url, { integrity: asset.hash, cache: 'no-cache' }));
     await caches.open(cacheName).then(cache => cache.addAll(assetsRequests));
 }

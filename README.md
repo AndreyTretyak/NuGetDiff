@@ -1,38 +1,39 @@
-# New Repo Project
+# NuGetDiff
 
-The new-repo project is a default template for .NET Foundation projects. It's also probably a fine start for other .NET projects (have at it, but change the license). It contains the correct license, a decent README, and initial project structure (including a standard .gitignore for the Visual Studio family of products).
+NuGetDiff is a Blazor WebAssembly progressive web app for understanding changes
+between NuGet package versions. The repository currently provides the lightweight
+application shell; the package comparison workflow has not been implemented yet.
 
-You can learn more about the project from the project [Documentation](Documentation).
+## Requirements
 
-## Using New Repo
+- .NET 10 SDK
 
-You can simply `git clone` this project to get started. It is recommended that you don't preserve history of the project (it isn't generally meaningful) for your repo, but make a copy and `git init` your project from source.
+## Run locally
 
-Consult [CHECKLIST.md](CHECKLIST.md) for helpful suggestions on preparing your repo to go public.
+```powershell
+dotnet run --project .\YewCone.NuGetDiff\YewCone.NuGetDiff\YewCone.NuGetDiff.csproj
+```
 
-## Building
+## Build and publish
 
-You don't "build" New Repo, however, this will be meaningful for many other projects.
+```powershell
+dotnet build .\YewCone.NuGetDiff\YewCone.NuGetDiff.sln -c Release
+dotnet publish .\YewCone.NuGetDiff\YewCone.NuGetDiff\YewCone.NuGetDiff.csproj -c Release
+```
+
+The development service worker always uses the network so local changes are visible
+immediately. Release publishes generate a versioned offline cache containing the
+Blazor runtime and the small NuGetDiff application shell.
+
+## Project layout
+
+- `YewCone.NuGetDiff\YewCone.NuGetDiff` - Blazor WebAssembly application
+- `YewCone.NuGetDiff\YewCone.NuGetDiff\wwwroot` - static and PWA assets
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for information on contributing to this project.
-
-This project has adopted the code of conduct defined by the [Contributor Covenant](http://contributor-covenant.org/) 
-to clarify expected behavior in our community. For more information, see the [.NET Foundation Code of Conduct](http://www.dotnetfoundation.org/code-of-conduct).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE-OF-CONDUCT.md](CODE-OF-CONDUCT.md).
 
 ## License
 
-This project is licensed with the [MIT license](LICENSE).
-
-## .NET Foundation
-
-New Repo is a [.NET Foundation project](https://dotnetfoundation.org/projects).
-
-## Related Projects
-
-You should take a look at these related projects:
-
-- [.NET Core](https://github.com/dotnet/core)
-- [ASP.NET](https://github.com/aspnet)
-- [Mono](https://github.com/mono)
+NuGetDiff is licensed under the [MIT License](LICENSE).

@@ -1,11 +1,13 @@
 {
-  "name": "YewCone.NuGetDiff",
-  "short_name": "YewCone.NuGetDiff",
+  "name": "NuGetDiff",
+  "short_name": "NuGetDiff",
+  "description": "A focused workspace for understanding changes between NuGet package versions.",
   "id": "./",
   "start_url": "./",
+  "scope": "./",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#03173d",
+  "background_color": "#f4f7fb",
+  "theme_color": "#17233c",
   "prefer_related_applications": false,
   "icons": [
     {
