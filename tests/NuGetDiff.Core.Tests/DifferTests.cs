@@ -63,6 +63,32 @@ public class DifferTests
     }
 
     [Fact]
+    public void Rename_detection_matches_each_removed_file_at_most_once()
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes("same");
+        using var oldR = MakeReader(("old.txt", bytes));
+        using var newR = MakeReader(("new-a.txt", bytes), ("new-b.txt", bytes));
+
+        var diff = new Differ().DiffTree(oldR, newR);
+
+        Assert.Single(diff.Changes, change => change.Kind == FileChangeKind.Renamed);
+        Assert.Single(diff.Changes, change => change.Kind == FileChangeKind.Added);
+        Assert.DoesNotContain(diff.Changes, change => change.Kind == FileChangeKind.Removed);
+    }
+
+    [Fact]
+    public void Tree_diff_honors_a_pre_canceled_token()
+    {
+        using var oldR = MakeReader(("old.txt", System.Text.Encoding.UTF8.GetBytes("old")));
+        using var newR = MakeReader(("new.txt", System.Text.Encoding.UTF8.GetBytes("new")));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.Throws<OperationCanceledException>(
+            () => new Differ().DiffTree(oldR, newR, cts.Token));
+    }
+
+    [Fact]
     public void Text_file_diff_reports_inserted_lines()
     {
         using var oldR = MakeReader(("notes.txt", System.Text.Encoding.UTF8.GetBytes("line1\nline2\n")));
@@ -72,6 +98,28 @@ public class DifferTests
         Assert.Equal(FileDiffKind.Text, diff.Kind);
         Assert.NotNull(diff.Text);
         Assert.Contains(diff.Text!.New, l => l.Kind == DiffLineKind.Inserted && l.Text.Contains("line3"));
+    }
+
+    [Fact]
+    public void Modified_text_lines_preserve_word_level_changes()
+    {
+        using var oldR = MakeReader((
+            "notes.txt",
+            System.Text.Encoding.UTF8.GetBytes("The quick brown fox\n")));
+        using var newR = MakeReader((
+            "notes.txt",
+            System.Text.Encoding.UTF8.GetBytes("The quick red fox\n")));
+
+        var diff = new Differ().DiffFile(oldR, newR, "notes.txt");
+        var oldLine = Assert.Single(diff.Text!.Old, line => line.Kind == DiffLineKind.Modified);
+        var newLine = Assert.Single(diff.Text.New, line => line.Kind == DiffLineKind.Modified);
+
+        Assert.Contains(oldLine.Segments!, segment =>
+            segment.Kind == DiffSegmentKind.Deleted && segment.Text.Contains("brown"));
+        Assert.Contains(newLine.Segments!, segment =>
+            segment.Kind == DiffSegmentKind.Inserted && segment.Text.Contains("red"));
+        Assert.Equal(oldLine.Text, string.Concat(oldLine.Segments!.Select(segment => segment.Text)));
+        Assert.Equal(newLine.Text, string.Concat(newLine.Segments!.Select(segment => segment.Text)));
     }
 
     [Fact]
@@ -124,6 +172,7 @@ public class DifferTests
         // Identical content on both sides → no inserted/deleted lines.
         Assert.DoesNotContain(diff.Text!.Old, l => l.Kind == DiffLineKind.Deleted);
         Assert.DoesNotContain(diff.Text!.New, l => l.Kind == DiffLineKind.Inserted);
+        Assert.Contains("No C# source differences", diff.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -149,5 +198,25 @@ public class DifferTests
         // Both sides fail to find the type → text is null and message explains.
         Assert.Null(diff.Text);
         Assert.False(string.IsNullOrEmpty(diff.Message));
+    }
+
+    [Fact]
+    public void DiffType_uses_both_paths_for_a_renamed_assembly()
+    {
+        var assembly = TestPackageBuilder.LoadCoreAssemblyBytes();
+        using var oldReader = MakeReader(("lib/net8.0/Old.dll", assembly));
+        using var newReader = MakeReader(("lib/net8.0/New.dll", assembly));
+
+        var diff = new Differ().DiffType(
+            oldReader,
+            newReader,
+            "lib/net8.0/Old.dll",
+            "lib/net8.0/New.dll",
+            "NuGetDiff.Core.Models.PackageDescriptor");
+
+        Assert.NotNull(diff.Text);
+        Assert.DoesNotContain(diff.Text!.Old, line => line.Kind != DiffLineKind.Equal);
+        Assert.DoesNotContain(diff.Text.New, line => line.Kind != DiffLineKind.Equal);
+        Assert.Contains("No C# source differences", diff.Message, StringComparison.Ordinal);
     }
 }

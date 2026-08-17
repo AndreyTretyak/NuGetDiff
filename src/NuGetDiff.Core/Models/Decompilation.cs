@@ -9,6 +9,23 @@ public sealed record DecompilationResult(
 
 public sealed record DecompilationError(string Message, string? Detail = null);
 
+public sealed record TypeDecompilation(
+    string ReflectionName,
+    DecompilationResult? Result,
+    DecompilationError? Error)
+{
+    public bool IsSuccess => Result is not null;
+}
+
+public sealed record TypeFingerprint(
+    string ReflectionName,
+    string? Content,
+    DecompilationError? Error)
+{
+    public bool IsSuccess => Content is not null;
+}
+
+
 /// <summary>
 /// Lightweight description of a top-level type in an assembly, used for
 /// building the navigation tree without paying the cost of decompiling.
@@ -21,4 +38,3 @@ public sealed record TypeSummary(
     string ReflectionName,
     string Namespace,
     string DisplayName);
-

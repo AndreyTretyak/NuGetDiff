@@ -18,7 +18,8 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
     private readonly PackageReader _reader;
     private readonly string _baseFolder;
     private readonly Dictionary<string, PEFile> _byPath = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, PEFile> _byName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PEFile> _byReference = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<string>> _pathsByName = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _unresolved = new();
 
     public IReadOnlyList<string> UnresolvedReferences => _unresolved;
@@ -27,27 +28,39 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
     {
         _reader = reader ?? throw new ArgumentNullException(nameof(reader));
         _baseFolder = (baseFolder ?? string.Empty).TrimEnd('/', '\\');
+        foreach (var entry in _reader.Files)
+        {
+            if (entry.Kind == FileKind.Assembly)
+            {
+                var name = System.IO.Path.GetFileNameWithoutExtension(entry.Path);
+                if (!_pathsByName.TryGetValue(name, out var paths))
+                {
+                    paths = new List<string>();
+                    _pathsByName[name] = paths;
+                }
+                paths.Add(entry.Path);
+            }
+        }
     }
 
     public MetadataFile? Resolve(IAssemblyReference reference)
     {
-        if (TryLoadInFolder(_baseFolder, reference.Name, out var pe))
+        if (_byReference.TryGetValue(reference.FullName, out var cached))
+        {
+            return cached;
+        }
+
+        if (TryLoadInFolder(_baseFolder, reference, out var pe))
         {
             return pe;
         }
 
         // Search anywhere else in the package: lib/<tfm>/<name>.dll, ref/<tfm>/<name>.dll, etc.
-        foreach (var entry in _reader.Files)
+        if (_pathsByName.TryGetValue(reference.Name, out var paths))
         {
-            if (entry.Kind != FileKind.Assembly)
+            foreach (var path in paths)
             {
-                continue;
-            }
-
-            var fileName = System.IO.Path.GetFileNameWithoutExtension(entry.Path);
-            if (string.Equals(fileName, reference.Name, StringComparison.OrdinalIgnoreCase))
-            {
-                if (TryLoadByPath(entry.Path, out pe))
+                if (TryLoadByPath(path, reference, out pe))
                 {
                     return pe;
                 }
@@ -67,7 +80,10 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
 
     public Task<MetadataFile?> ResolveModuleAsync(MetadataFile mainModule, string moduleName) => Task.FromResult<MetadataFile?>(null);
 
-    private bool TryLoadInFolder(string folder, string name, out PEFile? file)
+    private bool TryLoadInFolder(
+        string folder,
+        IAssemblyReference reference,
+        out PEFile? file)
     {
         if (string.IsNullOrEmpty(folder))
         {
@@ -75,16 +91,26 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
             return false;
         }
 
-        var candidate = $"{folder}/{name}.dll";
-        return TryLoadByPath(candidate, out file);
+        var candidate = $"{folder}/{reference.Name}.dll";
+        return TryLoadByPath(candidate, reference, out file);
     }
 
-    private bool TryLoadByPath(string path, out PEFile? file)
+    private bool TryLoadByPath(
+        string path,
+        IAssemblyReference reference,
+        out PEFile? file)
     {
         if (_byPath.TryGetValue(path, out var cached))
         {
-            file = cached;
-            return true;
+            if (MatchesReference(cached, reference))
+            {
+                _byReference[reference.FullName] = cached;
+                file = cached;
+                return true;
+            }
+
+            file = null;
+            return false;
         }
 
         if (!_reader.ContainsFile(path))
@@ -99,8 +125,14 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
             var ms = new MemoryStream(bytes, writable: false);
             // PEFile takes ownership of the stream; it disposes it when itself is disposed.
             var pe = new PEFile(path, ms);
+            if (!MatchesReference(pe, reference))
+            {
+                pe.Dispose();
+                file = null;
+                return false;
+            }
             _byPath[path] = pe;
-            _byName[System.IO.Path.GetFileNameWithoutExtension(path)] = pe;
+            _byReference[reference.FullName] = pe;
             file = pe;
             return true;
         }
@@ -111,6 +143,16 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
         }
     }
 
+    private static bool MatchesReference(
+        MetadataFile file,
+        IAssemblyReference reference)
+        => string.Equals(file.Name, reference.Name, StringComparison.OrdinalIgnoreCase)
+           && (reference.IsRetargetable
+               || string.Equals(
+                   file.FullName,
+                   reference.FullName,
+                   StringComparison.OrdinalIgnoreCase));
+
     public void Dispose()
     {
         foreach (var pe in _byPath.Values)
@@ -119,6 +161,6 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
             catch { /* defensive: never throw from Dispose */ }
         }
         _byPath.Clear();
-        _byName.Clear();
+        _byReference.Clear();
     }
 }

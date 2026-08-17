@@ -18,6 +18,7 @@
     --color-renamed-bg: #ddf4ff;
     --color-renamed-fg: #0969da;
     --color-imaginary-bg: #f6f8fa;
+    --color-active-fg: #ffffff;
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.06), 0 1px 1px rgba(0,0,0,0.04);
     --radius: 6px;
     --max-content: 1280px;
@@ -46,10 +47,12 @@
         --color-renamed-bg: #0d2c54;
         --color-renamed-fg: #79c0ff;
         --color-imaginary-bg: #161b22;
+        --color-active-fg: #0d1117;
     }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 
 html, body {
     margin: 0;
@@ -221,6 +224,7 @@ h3 { font-size: 1.05rem; }
 .file-tree-node { margin: 0.05rem 0; }
 .file-tree details summary { cursor: pointer; }
 .file-tree details summary .icon { margin-right: 0.3rem; }
+.file-tree .tree-status { margin: 0.25rem 0 0.25rem 1.25rem; font-size: 0.8rem; }
 /* Hybrid summary: an assembly node that is also clickable. The summary holds a
    real <a> rather than just text, so we strip the default summary list-marker
    spacing override and align with file rows. */
@@ -228,6 +232,8 @@ h3 { font-size: 1.05rem; }
     display: inline-flex;
 }
 .file-tree-node.is-asm > details > summary { padding-left: 0; }
+.assembly-open { margin-left: 0.35rem; padding: 0.05rem 0.35rem; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-muted); font-size: 0.7rem; vertical-align: middle; cursor: pointer; }
+.assembly-open:hover { color: var(--color-link); border-color: var(--color-link); }
 .file-link { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--color-text); padding: 0.05rem 0.25rem; border-radius: 4px; }
 .file-link:hover { background: var(--color-imaginary-bg); text-decoration: none; }
 .file-link .name { font-family: var(--font-mono); font-size: 0.9rem; }
@@ -268,6 +274,8 @@ h3 { font-size: 1.05rem; }
     color: var(--color-muted, #57606a);
     margin: 0 0 0.5rem 0;
 }
+.file-filter { display: flex; align-items: center; gap: 0.35rem; margin: 0 0 0.6rem; color: var(--color-muted); font-size: 0.8rem; cursor: pointer; user-select: none; }
+.file-filter input { margin: 0; }
 .file-content {
     min-width: 0; /* allow long pre/code to shrink in the grid track */
 }
@@ -329,22 +337,49 @@ h3 { font-size: 1.05rem; }
 .markdown-body table { border-collapse: collapse; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--color-border); padding: 0.3rem 0.6rem; }
 
+.diff-component { min-width: 0; }
+.diff-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem 1rem; margin-bottom: 0.6rem; }
+.diff-mode { display: inline-flex; border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+.diff-mode button { border: 0; border-right: 1px solid var(--color-border); border-radius: 0; padding: 0.3rem 0.65rem; background: var(--color-surface); color: var(--color-text); }
+.diff-mode button:last-child { border-right: 0; }
+.diff-mode button.active { background: var(--color-link); color: var(--color-active-fg); }
+.diff-option { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--color-muted); cursor: pointer; user-select: none; }
+.diff-option input { margin: 0; }
+.diff-notice { margin: 0 0 0.75rem; padding: 0.55rem 0.75rem; border: 1px solid var(--color-border); border-left: 3px solid var(--color-link); border-radius: var(--radius); background: var(--color-imaginary-bg); }
 .diff-view { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); }
 .diff-table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.82rem; }
 .diff-table .num-col { width: 3em; }
 .diff-table .text-col { width: 50%; }
+.diff-table .prefix-col { width: 1.5em; }
+.diff-table .inline-text-col { width: auto; }
+.diff-table thead th { position: sticky; top: 0; z-index: 1; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--color-border); background: var(--color-imaginary-bg); color: var(--color-muted); font-family: var(--font-sans); font-size: 0.75rem; font-weight: 600; text-align: left; }
+.diff-table thead th.num { text-align: right; }
 .diff-table td { padding: 0 0.5rem; vertical-align: top; }
 .diff-table td.num { color: var(--color-muted); text-align: right; user-select: none; border-right: 1px solid var(--color-border); }
+.diff-table td.prefix { color: var(--color-muted); text-align: center; user-select: none; padding: 0 0.25rem; }
 .diff-table td.line { white-space: pre-wrap; overflow-wrap: anywhere; }
-.diff-table td.line.inserted { background: var(--color-added-bg); color: var(--color-added-fg); }
-.diff-table td.line.deleted { background: var(--color-removed-bg); color: var(--color-removed-fg); }
-.diff-table td.line.modified { background: var(--color-modified-bg); color: var(--color-modified-fg); }
+.diff-view.no-wrap .diff-table td.line { white-space: pre; overflow-wrap: normal; }
+.diff-table td.line.inserted { background: var(--color-added-bg); color: var(--color-text); }
+.diff-table td.line.deleted { background: var(--color-removed-bg); color: var(--color-text); }
+.diff-table td.line.modified { background: var(--color-modified-bg); color: var(--color-text); }
 .diff-table td.line.imaginary { background: var(--color-imaginary-bg); }
+.diff-code { color: inherit; }
+.diff-table code.diff-segment,
+.diff-table code.diff-plain { background: transparent !important; color: inherit; padding: 0 !important; border: 0 !important; border-radius: 0 !important; box-shadow: none; text-shadow: none; font-size: inherit; line-height: inherit; white-space: inherit; }
+.diff-table .diff-segment.diff-segment-inserted { background: var(--color-added-strong) !important; color: var(--color-text) !important; }
+.diff-table .diff-segment.diff-segment-deleted { background: var(--color-removed-strong) !important; color: var(--color-text) !important; }
+.diff-table .diff-segment.diff-segment-modified { background: var(--color-modified-bg) !important; color: var(--color-text) !important; box-shadow: inset 0 -2px currentColor !important; }
+.diff-segment-inserted .token,
+.diff-segment-deleted .token,
+.diff-segment-modified .token { background: transparent !important; color: inherit !important; }
+.diff-line-content { display: inline; }
+.diff-more { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; border-top: 1px solid var(--color-border); }
+.diff-more button { padding: 0.35rem 0.7rem; }
 
 /* Tame Prism inside our themed containers: keep token colours, drop Prism's
    own background / padding / shadow so our diff colouring and code-view
    chrome stay in charge. */
-.diff-table code[class*="language-"],
+.diff-table code[class*="language-"]:not(.diff-segment),
 .code-view > code[class*="language-"] {
     background: none !important;
     padding: 0 !important;

@@ -11,21 +11,23 @@
                 <details open>
                     <summary><span class="icon">📁</span> @child.Name</summary>
                     <FileTree Node="child" Root="false" OnFileClick="OnFileClick"
+                              OnAssemblyExpand="OnAssemblyExpand"
+                              OnAssemblyToggle="OnAssemblyToggle"
                               SelectedPath="@SelectedPath" SelectedType="@SelectedType" />
                 </details>
             }
             else if (child.IsAssemblyContainer)
             {
-                @* Assembly with type children: expandable + clickable summary
-                   so users can either drill into a single type or open the
-                   whole assembly's "all types" overview. *@
-                <details open>
-                    <summary>
+                @* Assembly names and disclosure controls both toggle the same
+                   lazy type list, avoiding an expensive whole-module view. *@
+                <details open="@child.IsExpanded">
+                    <summary @onclick="@(() => ToggleAssembly(child))"
+                             @onclick:preventDefault="true">
                         <a class="file-link asm-summary @ChangeClass(child) @(IsSelected(child) ? "selected" : string.Empty)"
                            href="javascript:void(0)"
                            @onclick:stopPropagation="true"
                            @onclick:preventDefault="true"
-                           @onclick="@(() => OnFileClick.InvokeAsync(child))">
+                           @onclick="@(() => ToggleAssembly(child))">
                             <span class="icon">@KindIcon(child)</span>
                             <span class="name">@child.Name</span>
                             @if (child.Change is { Kind: var ack } && ack != FileChangeKind.Unchanged)
@@ -33,9 +35,41 @@
                                 <span class="badge badge-@ack.ToString().ToLowerInvariant()">@BadgeText(ack)</span>
                             }
                         </a>
+                        <button type="button"
+                               class="assembly-open"
+                               title="Open whole assembly"
+                               @onclick:stopPropagation="true"
+                               @onclick:preventDefault="true"
+                               @onclick="@(() => OnFileClick.InvokeAsync(child))">
+                            Open
+                        </button>
                     </summary>
-                    <FileTree Node="child" Root="false" OnFileClick="OnFileClick"
-                              SelectedPath="@SelectedPath" SelectedType="@SelectedType" />
+                    @if (child.TypeLoadState == AssemblyTypeLoadState.Loading)
+                    {
+                        <p class="tree-status muted">Loading types…</p>
+                    }
+                    else
+                    {
+                        @if (child.TypeLoadState == AssemblyTypeLoadState.Analyzing)
+                        {
+                            <p class="tree-status muted">Filtering unchanged types…</p>
+                        }
+                        else if (child.TypeLoadState == AssemblyTypeLoadState.Failed)
+                        {
+                            <p class="tree-status error">@child.TypeLoadError</p>
+                        }
+                        else if (child.TypeLoadState == AssemblyTypeLoadState.Loaded && child.Children.Count == 0)
+                        {
+                            <p class="tree-status muted">No matching types.</p>
+                        }
+                        @if (child.Children.Count > 0)
+                        {
+                            <FileTree Node="child" Root="false" OnFileClick="OnFileClick"
+                                      OnAssemblyExpand="OnAssemblyExpand"
+                                      OnAssemblyToggle="OnAssemblyToggle"
+                                      SelectedPath="@SelectedPath" SelectedType="@SelectedType" />
+                        }
+                    }
                 </details>
             }
             else
@@ -59,6 +93,8 @@
     [Parameter, EditorRequired] public FileTreeNode Node { get; set; } = default!;
     [Parameter] public bool Root { get; set; } = true;
     [Parameter] public EventCallback<FileTreeNode> OnFileClick { get; set; }
+    [Parameter] public EventCallback<FileTreeNode> OnAssemblyExpand { get; set; }
+    [Parameter] public EventCallback<FileTreeNode> OnAssemblyToggle { get; set; }
     [Parameter] public string? SelectedPath { get; set; }
     [Parameter] public string? SelectedType { get; set; }
 
@@ -74,6 +110,17 @@
         var nodeType = node.TypeFullName ?? string.Empty;
         var selType = SelectedType ?? string.Empty;
         return string.Equals(nodeType, selType, StringComparison.Ordinal);
+    }
+
+    private async Task ToggleAssembly(FileTreeNode node)
+    {
+        node.IsExpanded = !node.IsExpanded;
+        await OnAssemblyToggle.InvokeAsync(node);
+        if (node.IsExpanded
+            && node.TypeLoadState is AssemblyTypeLoadState.NotLoaded or AssemblyTypeLoadState.Failed)
+        {
+            await OnAssemblyExpand.InvokeAsync(node);
+        }
     }
 
     private static string KindIcon(FileTreeNode node)

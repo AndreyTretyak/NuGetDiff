@@ -18,6 +18,14 @@ public sealed record FileTreeNode(string Name, string FullPath, bool IsDirectory
 
     public List<FileTreeNode> Children { get; } = new();
 
+    public AssemblyTypeLoadState TypeLoadState { get; set; }
+
+    public string? TypeLoadError { get; set; }
+
+    public bool IsExpanded { get; set; }
+
+    public bool IsAssembly => !IsDirectory && Entry?.Kind == FileKind.Assembly;
+
     /// <summary>
     /// True for an assembly leaf that has been expanded with namespace
     /// folders + type leaves underneath. The renderer treats this as a
@@ -25,7 +33,7 @@ public sealed record FileTreeNode(string Name, string FullPath, bool IsDirectory
     /// is no longer a clickable file (the user clicks individual types).
     /// </summary>
     public bool IsAssemblyContainer
-        => !IsDirectory && Entry?.Kind == FileKind.Assembly && Children.Count > 0;
+        => IsAssembly;
 
     /// <summary>
     /// True when the node should render as expandable (real folder, or an
@@ -34,73 +42,106 @@ public sealed record FileTreeNode(string Name, string FullPath, bool IsDirectory
     public bool IsExpandable => IsDirectory || IsAssemblyContainer;
 }
 
+public enum AssemblyTypeLoadState
+{
+    NotLoaded,
+    Loading,
+    Analyzing,
+    Loaded,
+    Failed,
+}
+
 public static class FileTreeBuilder
 {
     public static FileTreeNode Build(IEnumerable<FileEntry> files)
-        => Build(files, typesFor: null);
-
-    /// <summary>
-    /// Builds a navigation tree from a flat list of package files. When
-    /// <paramref name="typesFor"/> is supplied, every assembly file is
-    /// expanded into namespace folders + type leaves so users can navigate
-    /// directly to a single class instead of seeing the whole module.
-    /// </summary>
-    public static FileTreeNode Build(
-        IEnumerable<FileEntry> files,
-        Func<FileEntry, IReadOnlyList<TypeSummary>>? typesFor)
     {
         var root = new FileTreeNode(string.Empty, string.Empty, IsDirectory: true);
         foreach (var f in files.OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase))
         {
-            var leaf = Insert(root, f.Path.Split('/'), 0, f, change: null);
-            if (typesFor is not null && f.Kind == FileKind.Assembly && leaf is not null)
-            {
-                IReadOnlyList<TypeSummary>? types = null;
-                try { types = typesFor(f); }
-                catch { /* caller decided this assembly is opaque — leave as a regular file. */ }
-                if (types is { Count: > 0 })
-                {
-                    foreach (var t in types)
-                    {
-                        InsertTypeNode(leaf, t, change: null);
-                    }
-                }
-            }
+            Insert(root, f.Path.Split('/'), 0, f, change: null);
         }
         Sort(root);
         return root;
     }
 
     public static FileTreeNode BuildFromChanges(IEnumerable<FileChange> changes)
-        => BuildFromChanges(changes, typesForOld: null, typesForNew: null);
-
-    /// <summary>
-    /// Builds a tree of changed files, optionally expanding modified / added /
-    /// removed assemblies into per-type changes underneath.
-    /// </summary>
-    public static FileTreeNode BuildFromChanges(
-        IEnumerable<FileChange> changes,
-        Func<FileEntry, IReadOnlyList<TypeSummary>>? typesForOld,
-        Func<FileEntry, IReadOnlyList<TypeSummary>>? typesForNew)
     {
         var root = new FileTreeNode(string.Empty, string.Empty, IsDirectory: true);
         foreach (var c in changes.OrderBy(c => c.Path, StringComparer.OrdinalIgnoreCase))
         {
             var entry = c.New ?? c.Old;
             if (entry is null) continue;
-            var leaf = Insert(root, c.Path.Split('/'), 0, entry, c);
-
-            if (leaf is null || entry.Kind != FileKind.Assembly) continue;
-            if (typesForOld is null && typesForNew is null) continue;
-
-            var typeChildren = BuildAssemblyTypeChanges(c, typesForOld, typesForNew);
-            foreach (var (summary, change) in typeChildren)
-            {
-                InsertTypeNode(leaf, summary, change);
-            }
+            Insert(root, c.Path.Split('/'), 0, entry, c);
         }
         Sort(root);
         return root;
+    }
+
+    public static void PopulateAssemblyTypes(
+        FileTreeNode assemblyNode,
+        IReadOnlyList<TypeSummary> types)
+    {
+        EnsureAssembly(assemblyNode);
+        assemblyNode.Children.Clear();
+        foreach (var type in types)
+        {
+            InsertTypeNode(assemblyNode, type, change: null);
+        }
+        Sort(assemblyNode);
+        assemblyNode.TypeLoadError = null;
+        assemblyNode.TypeLoadState = AssemblyTypeLoadState.Loaded;
+    }
+
+    public static void PopulateAssemblyTypeChanges(
+        FileTreeNode assemblyNode,
+        IReadOnlyList<TypeChange> typeChanges,
+        bool hideUnchanged)
+    {
+        EnsureAssembly(assemblyNode);
+        if (assemblyNode.Change is null)
+        {
+            throw new ArgumentException(
+                "An assembly change is required to populate comparison types.",
+                nameof(assemblyNode));
+        }
+
+        assemblyNode.Children.Clear();
+        foreach (var typeChange in typeChanges)
+        {
+            if (hideUnchanged && typeChange.Kind == FileChangeKind.Unchanged)
+            {
+                continue;
+            }
+
+            var change = new FileChange(
+                typeChange.Kind,
+                assemblyNode.Change.Old,
+                assemblyNode.Change.New);
+            InsertTypeNode(assemblyNode, typeChange.Type, change);
+        }
+        Sort(assemblyNode);
+        assemblyNode.TypeLoadError = null;
+        assemblyNode.TypeLoadState = AssemblyTypeLoadState.Loaded;
+    }
+
+    public static FileTreeNode? FindFileNode(FileTreeNode root, string path)
+    {
+        if (!root.IsDirectory
+            && root.TypeFullName is null
+            && string.Equals(root.FullPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            return root;
+        }
+
+        foreach (var child in root.Children)
+        {
+            var match = FindFileNode(child, path);
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+        return null;
     }
 
     private static FileTreeNode? Insert(FileTreeNode parent, string[] parts, int index, FileEntry entry, FileChange? change)
@@ -155,61 +196,11 @@ public static class FileTreeBuilder
         });
     }
 
-    private static IList<(TypeSummary Summary, FileChange? Change)> BuildAssemblyTypeChanges(
-        FileChange assemblyChange,
-        Func<FileEntry, IReadOnlyList<TypeSummary>>? typesForOld,
-        Func<FileEntry, IReadOnlyList<TypeSummary>>? typesForNew)
+    private static void EnsureAssembly(FileTreeNode node)
     {
-        var oldTypes = (typesForOld is not null && assemblyChange.Old is not null)
-            ? Safe(() => typesForOld(assemblyChange.Old))
-            : Array.Empty<TypeSummary>();
-        var newTypes = (typesForNew is not null && assemblyChange.New is not null)
-            ? Safe(() => typesForNew(assemblyChange.New))
-            : Array.Empty<TypeSummary>();
-
-        var oldByName = oldTypes.ToDictionary(t => t.ReflectionName, StringComparer.Ordinal);
-        var newByName = newTypes.ToDictionary(t => t.ReflectionName, StringComparer.Ordinal);
-        var allNames = new SortedSet<string>(oldByName.Keys.Concat(newByName.Keys), StringComparer.Ordinal);
-
-        var result = new List<(TypeSummary, FileChange?)>(allNames.Count);
-        foreach (var name in allNames)
+        if (!node.IsAssembly)
         {
-            var hasOld = oldByName.TryGetValue(name, out var ot);
-            var hasNew = newByName.TryGetValue(name, out var nt);
-            var summary = nt ?? ot!;
-
-            FileChangeKind kind;
-            if (hasOld && hasNew)
-            {
-                kind = assemblyChange.Kind switch
-                {
-                    FileChangeKind.Added => FileChangeKind.Added,
-                    FileChangeKind.Removed => FileChangeKind.Removed,
-                    FileChangeKind.Renamed => FileChangeKind.Modified,
-                    _ => FileChangeKind.Modified,
-                };
-            }
-            else if (hasNew)
-            {
-                kind = FileChangeKind.Added;
-            }
-            else
-            {
-                kind = FileChangeKind.Removed;
-            }
-
-            // Synthesise a FileChange so the existing badge / colour rendering
-            // still works for type leaves. Old/New entries are the assembly
-            // entries — only Kind is used by the renderer.
-            var change = new FileChange(kind, assemblyChange.Old, assemblyChange.New);
-            result.Add((summary, change));
-        }
-        return result;
-
-        static IReadOnlyList<TypeSummary> Safe(Func<IReadOnlyList<TypeSummary>> f)
-        {
-            try { return f() ?? Array.Empty<TypeSummary>(); }
-            catch { return Array.Empty<TypeSummary>(); }
+            throw new ArgumentException("The node is not a managed assembly.", nameof(node));
         }
     }
 

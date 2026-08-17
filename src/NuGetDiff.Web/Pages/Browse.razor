@@ -5,7 +5,7 @@
 @using NuGetDiff.Web.Components
 @using NuGetDiff.Web.Services
 @inherits CancellablePageBase
-@inject PackageResolver Resolver
+@inject PackageAnalysisService Analysis
 @inject BusyState Busy
 @inject NavigationManager Nav
 
@@ -84,7 +84,8 @@ else
         <h2>Contents (@_contents.Files.Count files)</h2>
         @if (_tree is not null)
         {
-            <FileTree Node="_tree" OnFileClick="OnFileClick" />
+            <FileTree Node="_tree" OnFileClick="OnFileClick"
+                      OnAssemblyExpand="OnAssemblyExpand" />
         }
     </section>
 }
@@ -107,27 +108,16 @@ else
         using var _ = Busy.Begin($"Loading {Id} {Version}…");
         try
         {
-            await using var stream = await Resolver.OpenOnlineAsync(Id, Version, ct);
+            var result = await Analysis.LoadOnlineAsync(Id, Version, ct);
             if (ct.IsCancellationRequested) return;
-            if (stream is null)
+            if (!result.IsSuccess)
             {
-                _error = $"Could not find {Id} {Version} on nuget.org.";
+                _error = result.Error;
                 return;
             }
-            using var reader = new PackageReader(stream);
-            var contents = reader.Read();
-            if (ct.IsCancellationRequested) return;
 
-            // Build the tree while the reader is still alive — listing types
-            // requires loading each PE file.
-            var decomp = new Decompiler();
-            Func<FileEntry, IReadOnlyList<TypeSummary>> typesFor = entry =>
-            {
-                var r = decomp.ListTypes(reader, entry.Path);
-                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
-            };
-            _tree = FileTreeBuilder.Build(contents.Files, typesFor);
-            _contents = contents;
+            _tree = FileTreeBuilder.Build(result.Contents!.Files);
+            _contents = result.Contents;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -138,6 +128,51 @@ else
             if (ct.IsCancellationRequested) return;
             _error = $"Failed to load package: {ex.Message}";
         }
+    }
+
+    private async Task OnAssemblyExpand(FileTreeNode node)
+    {
+        var ct = CurrentCancellationToken;
+        if (!node.IsAssembly || node.TypeLoadState != AssemblyTypeLoadState.NotLoaded)
+        {
+            return;
+        }
+
+        node.TypeLoadState = AssemblyTypeLoadState.Loading;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Analysis.LoadOnlineTypesAsync(
+                Id,
+                Version,
+                node.FullPath,
+                ct);
+            if (ct.IsCancellationRequested)
+            {
+                node.TypeLoadState = AssemblyTypeLoadState.NotLoaded;
+                return;
+            }
+            if (!result.IsSuccess)
+            {
+                node.TypeLoadState = AssemblyTypeLoadState.Failed;
+                node.TypeLoadError = result.Error!.Message;
+            }
+            else
+            {
+                FileTreeBuilder.PopulateAssemblyTypes(node, result.Types!);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            node.TypeLoadState = AssemblyTypeLoadState.NotLoaded;
+            return;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or ArgumentException)
+        {
+            node.TypeLoadState = AssemblyTypeLoadState.Failed;
+            node.TypeLoadError = $"Failed to load types: {ex.Message}";
+        }
+        await InvokeAsync(StateHasChanged);
     }
 
     private void OnFileClick(FileTreeNode node)

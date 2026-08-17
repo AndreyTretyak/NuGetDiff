@@ -19,9 +19,11 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="NuGetDiff.TestSupport" />
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\TestSupport\TestPackageBuilder.cs" Link="TestPackageBuilder.cs" />
     <ProjectReference Include="..\..\src\NuGetDiff.Core\NuGetDiff.Core.csproj" />
   </ItemGroup>
 

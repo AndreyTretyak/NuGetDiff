@@ -6,7 +6,7 @@
 @using NuGetDiff.Web.Components
 @using NuGetDiff.Web.Services
 @inherits CancellablePageBase
-@inject PackageResolver Resolver
+@inject PackageComparisonService Comparisons
 @inject BusyState Busy
 @inject NavigationManager Nav
 
@@ -18,35 +18,57 @@
     <strong>@V1 → @V2</strong>
 </nav>
 
-<h1>@Id <small class="version">@V1 → @V2</small></h1>
+<div class="file-layout">
+    <aside class="file-sidebar">
+        <h2 class="sidebar-title">Package files</h2>
+        <label class="file-filter">
+            <input type="checkbox" aria-label="Hide unchanged files" @bind="HideUnchangedFiles" />
+            Hide unchanged files
+        </label>
+        @if (_tree is not null)
+        {
+            <FileTree Node="_tree" OnFileClick="OnFileClick"
+                      OnAssemblyExpand="OnAssemblyExpand"
+                      OnAssemblyToggle="OnAssemblyToggle" />
+        }
+        else if (_error is not null)
+        {
+            <p class="muted">No tree available.</p>
+        }
+        else
+        {
+            <p class="muted">Loading tree…</p>
+        }
+    </aside>
 
-@if (_error is not null)
-{
-    <p class="error">@_error</p>
-}
-else if (_diff is null)
-{
-    <p>Computing diff…</p>
-}
-else
-{
-    var added = _diff.Changes.Count(c => c.Kind == FileChangeKind.Added);
-    var removed = _diff.Changes.Count(c => c.Kind == FileChangeKind.Removed);
-    var modified = _diff.Changes.Count(c => c.Kind == FileChangeKind.Modified);
-    var renamed = _diff.Changes.Count(c => c.Kind == FileChangeKind.Renamed);
-    <p class="diff-summary">
-        <span class="badge badge-added">+@added</span>
-        <span class="badge badge-removed">−@removed</span>
-        <span class="badge badge-modified">~@modified</span>
-        <span class="badge badge-renamed">⇄@renamed</span>
-        <span class="muted">(unchanged not shown)</span>
-    </p>
+    <section class="file-content">
+        <h1>@Id <small class="version">@V1 → @V2</small></h1>
 
-    @if (_tree is not null)
-    {
-        <FileTree Node="_tree" OnFileClick="OnFileClick" />
-    }
-}
+        @if (_error is not null)
+        {
+            <p class="error">@_error</p>
+        }
+        else if (_loading)
+        {
+            <p>Computing diff…</p>
+        }
+        else if (_diff is not null)
+        {
+            var added = _diff.Changes.Count(c => c.Kind == FileChangeKind.Added);
+            var removed = _diff.Changes.Count(c => c.Kind == FileChangeKind.Removed);
+            var modified = _diff.Changes.Count(c => c.Kind == FileChangeKind.Modified);
+            var renamed = _diff.Changes.Count(c => c.Kind == FileChangeKind.Renamed);
+            <p class="diff-summary">
+                <span class="badge badge-added">+@added</span>
+                <span class="badge badge-removed">−@removed</span>
+                <span class="badge badge-modified">~@modified</span>
+                <span class="badge badge-renamed">⇄@renamed</span>
+                <span class="muted">@(_hideUnchangedFiles ? "(unchanged hidden)" : "(all files shown)")</span>
+            </p>
+            <p class="muted">Select a changed file, or expand an assembly to choose a type.</p>
+        }
+    </section>
+</div>
 
 @code {
     [Parameter] public string Id { get; set; } = string.Empty;
@@ -56,49 +78,62 @@ else
     private TreeDiff? _diff;
     private FileTreeNode? _tree;
     private string? _error;
+    private bool _loading = true;
+    private bool _hideUnchangedFiles = true;
+    private readonly Dictionary<string, IReadOnlyList<TypeChange>> _loadedTypeChanges =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IReadOnlyList<TypeChange>> _listedTypeChanges =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _loadingTypePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _expandedTypePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _failedTypeLoads =
+        new(StringComparer.OrdinalIgnoreCase);
+    private long _nextTypeLoadId;
+
+    private bool HideUnchangedFiles
+    {
+        get => _hideUnchangedFiles;
+        set
+        {
+            if (_hideUnchangedFiles == value)
+            {
+                return;
+            }
+            _hideUnchangedFiles = value;
+            RebuildTree();
+        }
+    }
 
     protected override async Task OnParametersSetAsync()
     {
         var ct = BeginLoad();
         _diff = null;
         _tree = null;
+        _loadedTypeChanges.Clear();
+        _listedTypeChanges.Clear();
+        _loadingTypePaths.Clear();
+        _expandedTypePaths.Clear();
+        _failedTypeLoads.Clear();
         _error = null;
+        _loading = true;
         StateHasChanged();
         using var _ = Busy.Begin($"Loading {Id} {V1} and {V2}…");
         try
         {
-            await using var s1 = await Resolver.OpenOnlineAsync(Id, V1, ct);
+            var result = await Comparisons.CompareTreeAsync(Id, V1, V2, Busy.Update, ct);
             if (ct.IsCancellationRequested) return;
-            await using var s2 = await Resolver.OpenOnlineAsync(Id, V2, ct);
-            if (ct.IsCancellationRequested) return;
-            if (s1 is null) { _error = $"Could not find {Id} {V1}."; return; }
-            if (s2 is null) { _error = $"Could not find {Id} {V2}."; return; }
-
-            using var oldR = new PackageReader(s1);
-            using var newR = new PackageReader(s2);
-            Busy.Update("Computing tree diff…");
-            await Task.Yield();
-            if (ct.IsCancellationRequested) return;
-            var diff = new Differ().DiffTree(oldR, newR);
-            if (ct.IsCancellationRequested) return;
-
-            // Build the tree while readers are alive — listing types requires
-            // loading each PE file.
-            var changedOnly = diff.Changes.Where(c => c.Kind != FileChangeKind.Unchanged).ToList();
-            var decomp = new Decompiler();
-            Func<FileEntry, IReadOnlyList<TypeSummary>> typesForOld = entry =>
+            if (!result.IsSuccess)
             {
-                var r = decomp.ListTypes(oldR, entry.Path);
-                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
-            };
-            Func<FileEntry, IReadOnlyList<TypeSummary>> typesForNew = entry =>
-            {
-                var r = decomp.ListTypes(newR, entry.Path);
-                return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
-            };
-            _tree = FileTreeBuilder.BuildFromChanges(changedOnly, typesForOld, typesForNew);
-            _diff = diff;
+                _error = result.Error;
+                return;
+            }
+
+            _diff = result.Diff;
+            RebuildTree();
         }
+
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             return;
@@ -108,6 +143,209 @@ else
             if (ct.IsCancellationRequested) return;
             _error = $"Failed to diff: {ex.Message}";
         }
+        finally
+        {
+            if (!ct.IsCancellationRequested)
+            {
+                _loading = false;
+            }
+        }
+    }
+
+    private void RebuildTree()
+    {
+        if (_diff is null)
+        {
+            _tree = null;
+            return;
+        }
+
+        var changes = _hideUnchangedFiles
+            ? _diff.Changes.Where(ShouldIncludeFile)
+            : _diff.Changes;
+        _tree = FileTreeBuilder.BuildFromChanges(changes);
+        foreach (var (path, typeChanges) in _loadedTypeChanges)
+        {
+            var assembly = FileTreeBuilder.FindFileNode(_tree, path);
+            if (assembly is null)
+            {
+                continue;
+            }
+            assembly.IsExpanded = _expandedTypePaths.Contains(path);
+            FileTreeBuilder.PopulateAssemblyTypeChanges(
+                assembly,
+                typeChanges,
+                _hideUnchangedFiles);
+        }
+        foreach (var (path, typeChanges) in _listedTypeChanges)
+        {
+            if (_loadedTypeChanges.ContainsKey(path))
+            {
+                continue;
+            }
+            var assembly = FileTreeBuilder.FindFileNode(_tree, path);
+            if (assembly is null)
+            {
+                continue;
+            }
+            assembly.IsExpanded = _expandedTypePaths.Contains(path);
+            FileTreeBuilder.PopulateAssemblyTypeChanges(
+                assembly,
+                typeChanges,
+                hideUnchanged: false);
+            assembly.TypeLoadState = AssemblyTypeLoadState.Analyzing;
+        }
+        foreach (var path in _loadingTypePaths.Keys)
+        {
+            var assembly = FileTreeBuilder.FindFileNode(_tree, path);
+            if (assembly is not null)
+            {
+                assembly.IsExpanded = _expandedTypePaths.Contains(path);
+                assembly.TypeLoadState = _listedTypeChanges.ContainsKey(path)
+                    ? AssemblyTypeLoadState.Analyzing
+                    : AssemblyTypeLoadState.Loading;
+            }
+        }
+        foreach (var (path, error) in _failedTypeLoads)
+        {
+            var assembly = FileTreeBuilder.FindFileNode(_tree, path);
+            if (assembly is not null)
+            {
+                assembly.IsExpanded = _expandedTypePaths.Contains(path);
+                assembly.TypeLoadState = AssemblyTypeLoadState.Failed;
+                assembly.TypeLoadError = error;
+            }
+        }
+
+    }
+
+    private bool ShouldIncludeFile(FileChange change)
+        => change.Kind != FileChangeKind.Unchanged
+           || (_loadedTypeChanges.TryGetValue(change.Path, out var typeChanges)
+               && typeChanges.Any(typeChange =>
+                   typeChange.Kind != FileChangeKind.Unchanged))
+           || _listedTypeChanges.ContainsKey(change.Path)
+           || _failedTypeLoads.ContainsKey(change.Path);
+
+    private async Task OnAssemblyExpand(FileTreeNode node)
+    {
+        var ct = CurrentCancellationToken;
+        if (!node.IsAssembly || node.Change is null
+            || node.TypeLoadState is not (AssemblyTypeLoadState.NotLoaded or AssemblyTypeLoadState.Failed))
+        {
+            return;
+        }
+
+        var path = node.FullPath;
+        _failedTypeLoads.Remove(path);
+        var loadId = ++_nextTypeLoadId;
+        _loadingTypePaths[path] = loadId;
+        node.TypeLoadState = AssemblyTypeLoadState.Loading;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var listed = await Comparisons.LoadAssemblyTypeListAsync(
+                Id,
+                V1,
+                V2,
+                node.Change,
+                ct);
+            if (ct.IsCancellationRequested)
+            {
+                if (!CompleteTypeLoad(path, loadId)) return;
+                SetCurrentTypeLoadState(path, AssemblyTypeLoadState.NotLoaded);
+                return;
+            }
+            if (!listed.IsSuccess)
+            {
+                if (!CompleteTypeLoad(path, loadId)) return;
+                _failedTypeLoads[path] = listed.Error ?? "Failed to load assembly types.";
+                RebuildTree();
+                return;
+            }
+
+            _listedTypeChanges[path] = listed.Changes!;
+            RebuildTree();
+            await InvokeAsync(StateHasChanged);
+
+            var result = await Comparisons.LoadAssemblyTypesAsync(
+                Id,
+                V1,
+                V2,
+                node.Change,
+                ct);
+            if (ct.IsCancellationRequested)
+            {
+                if (!CompleteTypeLoad(path, loadId)) return;
+                _listedTypeChanges.Remove(path);
+                SetCurrentTypeLoadState(path, AssemblyTypeLoadState.NotLoaded);
+                return;
+            }
+            if (!CompleteTypeLoad(path, loadId)) return;
+            if (!result.IsSuccess)
+            {
+                _failedTypeLoads[path] = result.Error ?? "Failed to filter unchanged types.";
+                RebuildTree();
+                return;
+            }
+
+            _listedTypeChanges.Remove(path);
+            _failedTypeLoads.Remove(path);
+            _loadedTypeChanges[path] = result.Changes!;
+            RebuildTree();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            if (!CompleteTypeLoad(path, loadId)) return;
+            _listedTypeChanges.Remove(path);
+            RebuildTree();
+            SetCurrentTypeLoadState(path, AssemblyTypeLoadState.NotLoaded);
+            return;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or ArgumentException)
+        {
+            if (!CompleteTypeLoad(path, loadId)) return;
+            _failedTypeLoads[path] = $"Failed to load types: {ex.Message}";
+            RebuildTree();
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void OnAssemblyToggle(FileTreeNode node)
+    {
+        if (node.IsExpanded)
+        {
+            _expandedTypePaths.Add(node.FullPath);
+        }
+        else
+        {
+            _expandedTypePaths.Remove(node.FullPath);
+        }
+    }
+
+    private bool CompleteTypeLoad(string path, long loadId)
+    {
+        if (!_loadingTypePaths.TryGetValue(path, out var current)
+            || current != loadId)
+        {
+            return false;
+        }
+        _loadingTypePaths.Remove(path);
+        return true;
+    }
+
+    private FileTreeNode? SetCurrentTypeLoadState(
+        string path,
+        AssemblyTypeLoadState state)
+    {
+        var current = _tree is null
+            ? null
+            : FileTreeBuilder.FindFileNode(_tree, path);
+        if (current is not null)
+        {
+            current.TypeLoadState = state;
+        }
+        return current;
     }
 
     private void OnFileClick(FileTreeNode node)

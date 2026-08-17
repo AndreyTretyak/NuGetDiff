@@ -89,4 +89,22 @@ public class PackageReaderTests
         var read = reader.ReadFileBytes("readme.md");
         Assert.Equal(payload, read);
     }
+
+    [Fact]
+    public void Finds_files_case_insensitively_and_reports_archive_length()
+    {
+        var payload = new byte[64 * 1024];
+        Array.Fill<byte>(payload, 0x2A);
+        var bytes = TestPackageBuilder.Build(
+            id: "Pkg",
+            version: "1.0.0",
+            files: new[] { new TestPackageBuilder.FileSpec("lib/net8.0/Pkg.dll", payload) });
+
+        using var reader = new PackageReader(new MemoryStream(bytes));
+        var entry = reader.FindFile("LIB/NET8.0/PKG.DLL");
+
+        Assert.NotNull(entry);
+        Assert.Equal(payload.Length, entry.Length);
+        Assert.True(reader.ContainsFile("Lib/Net8.0/Pkg.dll"));
+    }
 }

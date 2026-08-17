@@ -12,6 +12,8 @@ public abstract class CancellablePageBase : ComponentBase, IDisposable
 {
     private CancellationTokenSource? _cts;
 
+    protected CancellationToken CurrentCancellationToken => _cts?.Token ?? CancellationToken.None;
+
     protected CancellationToken BeginLoad()
     {
         _cts?.Cancel();
