@@ -197,6 +197,12 @@ public sealed class PackageComparisonService
         }
 
         var listedChanges = listed.Changes!;
+        if (change.Kind is FileChangeKind.Unchanged or FileChangeKind.Renamed)
+        {
+            _cache.SetTypeChanges(pair, oldPath, newPath, listedChanges);
+            return new AssemblyTypeComparisonLoadResult(listedChanges, null);
+        }
+
         var changes = listedChanges
             .Where(typeChange => typeChange.Kind != FileChangeKind.Unchanged)
             .ToList();
@@ -243,8 +249,8 @@ public sealed class PackageComparisonService
                 var kind = oldFingerprint.IsSuccess
                            && newFingerprint.IsSuccess
                            && string.Equals(
-                               oldFingerprint.Content,
-                               newFingerprint.Content,
+                               oldFingerprint.ContentHash,
+                               newFingerprint.ContentHash,
                                StringComparison.Ordinal)
                     ? FileChangeKind.Unchanged
                     : FileChangeKind.Modified;

@@ -9,6 +9,8 @@ using NuGetDiff.Core.Diffing;
 using NuGetDiff.Core.Models;
 using NuGetDiff.Core.Packages;
 using NuGetDiff.Core.Util;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace NuGetDiff.Core.Decompilation;
 
@@ -17,7 +19,7 @@ namespace NuGetDiff.Core.Decompilation;
 /// All input is read via streams; no filesystem access is performed, which is what makes
 /// this safe to run inside Blazor WebAssembly.
 /// </summary>
-public sealed class Decompiler
+public sealed partial class Decompiler
 {
     private readonly DecompilerSettings _settings;
 
@@ -31,6 +33,12 @@ public sealed class Decompiler
             ThrowOnAssemblyResolveErrors = false,
         };
     }
+
+    private sealed record GeneratedSymbol(
+        string Token,
+        string Prefix,
+        int MajorOrdinal,
+        int MinorOrdinal);
 
     /// <summary>
     /// Decompiles a single managed assembly contained in the package at <paramref name="path"/>.
@@ -421,58 +429,6 @@ public sealed class Decompiler
         }
     }
 
-    private static bool HasNativeMethods(
-        PEFile pe,
-        System.Reflection.Metadata.TypeDefinitionHandle handle)
-    {
-        var pending = new Stack<System.Reflection.Metadata.TypeDefinitionHandle>();
-        pending.Push(handle);
-        while (pending.TryPop(out var current))
-        {
-            var definition = pe.Metadata.GetTypeDefinition(current);
-            foreach (var methodHandle in definition.GetMethods())
-            {
-                var method = pe.Metadata.GetMethodDefinition(methodHandle);
-                var implementation = method.ImplAttributes;
-                if ((implementation & System.Reflection.MethodImplAttributes.Native) != 0
-                    || (implementation & System.Reflection.MethodImplAttributes.Unmanaged) != 0)
-                {
-                    return true;
-                }
-            }
-            foreach (var nested in definition.GetNestedTypes())
-            {
-                pending.Push(nested);
-            }
-        }
-        return false;
-    }
-
-    private static bool HasDeclarativeSecurity(
-        PEFile pe,
-        System.Reflection.Metadata.TypeDefinitionHandle handle)
-    {
-        var pending = new Stack<System.Reflection.Metadata.TypeDefinitionHandle>();
-        pending.Push(handle);
-        while (pending.TryPop(out var current))
-        {
-            var definition = pe.Metadata.GetTypeDefinition(current);
-            if (definition.GetDeclarativeSecurityAttributes().Count > 0
-                || definition.GetMethods().Any(method =>
-                    pe.Metadata.GetMethodDefinition(method)
-                        .GetDeclarativeSecurityAttributes()
-                        .Count > 0))
-            {
-                return true;
-            }
-            foreach (var nested in definition.GetNestedTypes())
-            {
-                pending.Push(nested);
-            }
-        }
-        return false;
-    }
-
     public async Task<IReadOnlyList<TypeFingerprint>> FingerprintTypesFromPackageAsync(
         PackageReader package,
         string path,
@@ -496,50 +452,34 @@ public sealed class Decompiler
                 .ToArray();
         }
 
-        var (pe, resolver, _) = loaded.Ok!;
+        var (pe, resolver, bytes) = loaded.Ok!;
         try
         {
             var handlesByName = pe.Metadata.GetTopLevelTypeDefinitions()
                 .ToDictionary(
                     handle => handle.GetFullTypeName(pe.Metadata).ReflectionName,
                     StringComparer.Ordinal);
-            var hiddenTypeNames = pe.Metadata.GetTopLevelTypeDefinitions()
-                .Where(handle => IsHiddenHelperTypeName(
-                    pe.Metadata.GetString(
-                        pe.Metadata.GetTypeDefinition(handle).Name))
-                    || pe.Metadata.GetString(
-                        pe.Metadata.GetTypeDefinition(handle).Name) == "<Module>")
-                .SelectMany(handle =>
-                {
-                    var definition = pe.Metadata.GetTypeDefinition(handle);
-                    var simpleName = pe.Metadata.GetString(definition.Name);
-                    var fullName = handle.GetFullTypeName(pe.Metadata).ReflectionName;
-                    return new[]
-                    {
-                        simpleName,
-                        fullName,
-                        DisassemblerHelpers.Escape(simpleName),
-                        DisassemblerHelpers.Escape(fullName),
-                    };
-                })
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            var moduleHash = package.HashFile(path);
-            var moduleHasExecutableMembers = pe.Metadata.GetTopLevelTypeDefinitions()
-                .Where(handle =>
-                    pe.Metadata.GetString(
-                        pe.Metadata.GetTypeDefinition(handle).Name) == "<Module>")
-                .Select(handle => pe.Metadata.GetTypeDefinition(handle))
-                .Any(module => module.GetMethods().Any(method =>
-                    pe.Metadata.GetMethodDefinition(method).RelativeVirtualAddress != 0));
-            var assemblyHasSecurity = pe.Metadata.IsAssembly
-                                      && pe.Metadata.GetAssemblyDefinition()
-                                          .GetDeclarativeSecurityAttributes()
-                                          .Count > 0;
             var results = new List<TypeFingerprint>(names.Length);
+            var moduleHash = HashUtil.Sha256Hex(bytes);
+            var (staticDataHashes, staticDataError) =
+                await GetStaticDataHashesAsync(pe, ct);
+            var privateImplementationMemberHashes =
+                await GetPrivateImplementationMemberHashesAsync(
+                    pe,
+                    resolver,
+                    staticDataHashes,
+                    moduleHash,
+                    ct);
+            var hiddenHelpers = await BuildHiddenHelperFingerprintsAsync(
+                pe,
+                resolver,
+                staticDataHashes,
+                privateImplementationMemberHashes,
+                moduleHash,
+                ct);
             for (var index = 0; index < names.Length; index++)
             {
-                if (index > 0)
+                if (index > 0 && index % 8 == 0)
                 {
                     await Task.Yield();
                 }
@@ -556,7 +496,11 @@ public sealed class Decompiler
 
                 try
                 {
-                    using var writer = new StringWriter();
+                    var output = new StringBuilder();
+                    using var writer = new StringWriter(output)
+                    {
+                        NewLine = "\n",
+                    };
                     var disassembler = new ReflectionDisassembler(
                         new PlainTextOutput(writer),
                         ct)
@@ -568,26 +512,47 @@ public sealed class Decompiler
                         ShowRawRVAOffsetAndBytes = false,
                     };
                     disassembler.DisassembleType(pe, handle);
-                    var fingerprint = NormalizeFingerprint(writer.ToString());
+                    var fingerprint = NormalizeFingerprint(output.ToString());
                     fingerprint = AppendAssemblyReferenceIdentities(
                         fingerprint,
                         pe,
                         moduleHash);
-                    if (RequiresModuleContext(
-                            fingerprint,
-                            hiddenTypeNames)
-                        || HasDisassemblyDiagnostic(fingerprint)
-                        || moduleHasExecutableMembers
-                        || assemblyHasSecurity
-                        || HasDeclarativeSecurity(pe, handle)
-                        || HasNativeMethods(pe, handle))
+                    foreach (var staticData in staticDataHashes
+                                 .Where(item => ReferencesStaticData(fingerprint, item))
+                                 .OrderBy(item => item.DeclaringType, StringComparer.Ordinal)
+                                 .ThenBy(item => item.FieldName, StringComparer.Ordinal))
                     {
-                        fingerprint += "\n// Module context: " + moduleHash;
+                        fingerprint += $"\n// Static data {staticData.DeclaringType}::{staticData.FieldName}: {staticData.Hash}";
                     }
+                    foreach (var (memberName, hash) in privateImplementationMemberHashes
+                                 .Where(pair => ReferencesMember(fingerprint, pair.Key))
+                                 .OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                    {
+                        fingerprint += $"\n// Private member {memberName}: {hash}";
+                    }
+                    if (staticDataError is not null
+                        && RequiresModuleContext(
+                            fingerprint,
+                            new[] { "<PrivateImplementationDetails>" }))
+                    {
+                        fingerprint += "\n// Static data inspection fallback: " + moduleHash;
+                    }
+                    var referencedHelpers = hiddenHelpers
+                        .Where(helper => ReferencesType(
+                            fingerprint,
+                            helper.ReflectionName,
+                            helper.SimpleName))
+                        .OrderBy(helper => helper.SimpleName, StringComparer.Ordinal)
+                        .ThenBy(helper => helper.ReflectionName, StringComparer.Ordinal);
+                    foreach (var helper in referencedHelpers)
+                    {
+                        fingerprint += $"\n// Hidden helper {helper.ReflectionName}: {helper.ContentHash}";
+                    }
+                    fingerprint = CanonicalizeFingerprint(fingerprint);
 
                     results.Add(new TypeFingerprint(
                         reflectionName,
-                        fingerprint,
+                        HashUtil.Sha256Hex(fingerprint.AsSpan()),
                         null));
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -612,6 +577,363 @@ public sealed class Decompiler
             resolver.Dispose();
         }
     }
+
+    private static async Task<IReadOnlyList<HiddenHelperFingerprint>>
+        BuildHiddenHelperFingerprintsAsync(
+        PEFile pe,
+        PackageAssemblyResolver resolver,
+        IReadOnlyList<StaticDataHash> staticDataHashes,
+        IReadOnlyDictionary<string, string> privateImplementationMemberHashes,
+        string moduleHash,
+        CancellationToken ct)
+    {
+        var helpers = new List<HiddenHelperContent>();
+        var output = new StringBuilder();
+        using var writer = new StringWriter(output)
+        {
+            NewLine = "\n",
+        };
+        var disassembler = new ReflectionDisassembler(
+            new PlainTextOutput(writer),
+            ct)
+        {
+            AssemblyResolver = resolver,
+            DetectControlStructure = false,
+            ExpandMemberDefinitions = true,
+            ShowMetadataTokens = false,
+            ShowRawRVAOffsetAndBytes = false,
+        };
+
+        var handles = pe.Metadata.GetTopLevelTypeDefinitions().ToArray();
+        for (var index = 0; index < handles.Length; index++)
+        {
+            if (index > 0 && index % 8 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var handle = handles[index];
+            var definition = pe.Metadata.GetTypeDefinition(handle);
+            var simpleName = pe.Metadata.GetString(definition.Name);
+            if (!IsHiddenHelperTypeName(simpleName)
+                || IsPrivateImplementationTypeName(simpleName))
+            {
+                continue;
+            }
+
+            output.Clear();
+            disassembler.DisassembleType(pe, handle);
+            var rawContent = NormalizeFingerprint(output.ToString());
+            rawContent = AppendAssemblyReferenceIdentities(
+                rawContent,
+                pe,
+                moduleHash);
+            foreach (var staticData in staticDataHashes
+                         .Where(item => ReferencesStaticData(rawContent, item))
+                         .OrderBy(item => item.DeclaringType, StringComparer.Ordinal)
+                         .ThenBy(item => item.FieldName, StringComparer.Ordinal))
+            {
+                rawContent += $"\n// Static data {staticData.DeclaringType}::{staticData.FieldName}: {staticData.Hash}";
+            }
+            foreach (var (memberName, hash) in privateImplementationMemberHashes
+                         .Where(pair => ReferencesMember(rawContent, pair.Key))
+                         .OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            {
+                rawContent += $"\n// Private member {memberName}: {hash}";
+            }
+            var canonicalContent = CanonicalizeFingerprint(rawContent);
+            helpers.Add(new HiddenHelperContent(
+                simpleName,
+                handle.GetFullTypeName(pe.Metadata).ReflectionName,
+                rawContent,
+                HashUtil.Sha256Hex(canonicalContent.AsSpan())));
+        }
+
+        var dependencies = new IReadOnlyList<int>[helpers.Count];
+        for (var index = 0; index < helpers.Count; index++)
+        {
+            if (index > 0 && index % 8 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var current = helpers[index];
+            var referenced = new List<int>();
+            for (var candidateIndex = 0; candidateIndex < helpers.Count; candidateIndex++)
+            {
+                if (candidateIndex == index)
+                {
+                    continue;
+                }
+                var candidate = helpers[candidateIndex];
+                if (ReferencesType(
+                        current.RawContent,
+                        candidate.ReflectionName,
+                        candidate.SimpleName))
+                {
+                    referenced.Add(candidateIndex);
+                }
+            }
+            dependencies[index] = referenced;
+        }
+
+        var result = new List<HiddenHelperFingerprint>(helpers.Count);
+        for (var index = 0; index < helpers.Count; index++)
+        {
+            if (index > 0 && index % 8 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var reachable = new HashSet<int>();
+            var pending = new Stack<int>();
+            pending.Push(index);
+            while (pending.TryPop(out var current))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!reachable.Add(current))
+                {
+                    continue;
+                }
+                foreach (var dependency in dependencies[current])
+                {
+                    pending.Push(dependency);
+                }
+            }
+
+            var closure = string.Join(
+                '\n',
+                reachable
+                    .Select(item => helpers[item].ContentHash)
+                    .OrderBy(hash => hash, StringComparer.Ordinal));
+            var helper = helpers[index];
+            result.Add(new HiddenHelperFingerprint(
+                helper.SimpleName,
+                helper.ReflectionName,
+                HashUtil.Sha256Hex(closure.AsSpan())));
+        }
+        return result;
+    }
+
+    internal static string CanonicalizeFingerprint(string content)
+    {
+        var surface = new StringBuilder(content.Length);
+        var nestedBlocks = new List<string>();
+        var helperAnnotations = new List<string>();
+        StringBuilder? nestedBlock = null;
+        var inNestedSection = false;
+
+        foreach (var rawLine in content.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            if (!inNestedSection
+                && line.StartsWith("// Hidden helper ", StringComparison.Ordinal))
+            {
+                helperAnnotations.Add(line);
+                continue;
+            }
+            if (!inNestedSection && line == "\t// Nested Types")
+            {
+                inNestedSection = true;
+                continue;
+            }
+
+            if (inNestedSection)
+            {
+                var sectionEnded = line.Length > 0
+                    && (line[0] != '\t'
+                        || (line.StartsWith("\t// ", StringComparison.Ordinal)
+                            && !line.StartsWith("\t// end ", StringComparison.Ordinal)));
+                if (sectionEnded)
+                {
+                    AddNestedBlock();
+                    inNestedSection = false;
+                    surface.Append(line).Append('\n');
+                    continue;
+                }
+
+                if (line.StartsWith("\t.class nested ", StringComparison.Ordinal))
+                {
+                    AddNestedBlock();
+                    nestedBlock = new StringBuilder();
+                }
+                nestedBlock?.Append(line).Append('\n');
+                continue;
+            }
+
+            surface.Append(line).Append('\n');
+        }
+        AddNestedBlock();
+
+        var symbols = new GeneratedSymbolMap();
+        var canonical = new StringBuilder(content.Length);
+        canonical.Append(
+            NormalizeGeneratedSymbols(
+                surface.ToString(),
+                symbols,
+                "surface"));
+        var blockGroups = nestedBlocks
+            .Select(block => new
+            {
+                Content = block,
+                SortKey = GeneratedSymbolSortKey(block, symbols),
+            })
+            .GroupBy(block => block.SortKey, StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal);
+        foreach (var group in blockGroups)
+        {
+            var scope = HashUtil.Sha256Hex(group.Key.AsSpan())[..12];
+            var nextSymbolId = 0;
+            foreach (var symbol in group
+                         .SelectMany(block => GeneratedSymbols(block.Content))
+                         .Where(symbol => !symbols.Replacements.ContainsKey(symbol.Token))
+                         .Distinct()
+                         .OrderBy(symbol => symbol.Prefix, StringComparer.Ordinal)
+                         .ThenBy(symbol => symbol.MajorOrdinal)
+                         .ThenBy(symbol => symbol.MinorOrdinal)
+                         .ThenBy(symbol => symbol.Token, StringComparer.Ordinal))
+            {
+                symbols.Replacements.Add(
+                    symbol.Token,
+                    symbol.Prefix + "#" + scope + "_" + nextSymbolId++);
+            }
+
+            foreach (var block in group
+                         .Select(block => NormalizeGeneratedSymbols(
+                             block.Content,
+                             symbols,
+                             scope))
+                         .OrderBy(block => block, StringComparer.Ordinal))
+            {
+                canonical.Append("\n// Nested type\n").Append(block);
+            }
+        }
+        var annotationGroups = helperAnnotations
+            .Select(annotation => new
+            {
+                Content = annotation,
+                SortKey = GeneratedSymbolSortKey(annotation, symbols),
+            })
+            .GroupBy(annotation => annotation.SortKey, StringComparer.Ordinal)
+            .OrderBy(group => group.Key, StringComparer.Ordinal);
+        foreach (var group in annotationGroups)
+        {
+            var scope = HashUtil.Sha256Hex(group.Key.AsSpan())[..12];
+            var nextSymbolId = 0;
+            foreach (var symbol in group
+                         .SelectMany(annotation => GeneratedSymbols(annotation.Content))
+                         .Where(symbol => !symbols.Replacements.ContainsKey(symbol.Token))
+                         .Distinct()
+                         .OrderBy(symbol => symbol.Prefix, StringComparer.Ordinal)
+                         .ThenBy(symbol => symbol.MajorOrdinal)
+                         .ThenBy(symbol => symbol.MinorOrdinal)
+                         .ThenBy(symbol => symbol.Token, StringComparer.Ordinal))
+            {
+                symbols.Replacements.Add(
+                    symbol.Token,
+                    symbol.Prefix + "#" + scope + "_" + nextSymbolId++);
+            }
+
+            foreach (var annotation in group
+                         .Select(annotation => NormalizeGeneratedSymbols(
+                             annotation.Content,
+                             symbols,
+                             scope))
+                         .OrderBy(annotation => annotation, StringComparer.Ordinal))
+            {
+                canonical.Append('\n').Append(annotation);
+            }
+        }
+        return canonical.ToString();
+
+        void AddNestedBlock()
+        {
+            if (nestedBlock is null)
+            {
+                return;
+            }
+            nestedBlocks.Add(nestedBlock.ToString().TrimEnd('\n'));
+            nestedBlock = null;
+        }
+    }
+
+    private static string NormalizeGeneratedSymbols(
+        string content,
+        GeneratedSymbolMap symbols,
+        string scope)
+    {
+        var nextSymbolId = 0;
+        return GeneratedOrdinalRegex().Replace(
+            content,
+            match =>
+            {
+                var prefix = match.Groups["prefix"];
+                if (!prefix.Success)
+                {
+                    return match.Value;
+                }
+                if (!symbols.Replacements.TryGetValue(match.Value, out var replacement))
+                {
+                    replacement = prefix.Value
+                                  + "#"
+                                  + scope
+                                  + "_"
+                                  + nextSymbolId++;
+                    symbols.Replacements.Add(match.Value, replacement);
+                }
+                return replacement;
+            });
+    }
+
+    private static string GeneratedSymbolSortKey(
+        string content,
+        GeneratedSymbolMap knownSymbols)
+        => GeneratedOrdinalRegex().Replace(
+            content,
+            match =>
+            {
+                var prefix = match.Groups["prefix"];
+                if (!prefix.Success)
+                {
+                    return match.Value;
+                }
+                return knownSymbols.Replacements.TryGetValue(match.Value, out var replacement)
+                    ? replacement
+                    : prefix.Value + "#?";
+            });
+
+    private static IEnumerable<GeneratedSymbol> GeneratedSymbols(
+        string content)
+    {
+        foreach (Match match in GeneratedOrdinalRegex().Matches(content))
+        {
+            var prefix = match.Groups["prefix"];
+            if (prefix.Success)
+            {
+                var ordinalParts = match.Groups["ordinal"].Value.Split('_', 2);
+                yield return new GeneratedSymbol(
+                    match.Value,
+                    prefix.Value,
+                    int.Parse(ordinalParts[0], System.Globalization.CultureInfo.InvariantCulture),
+                    ordinalParts.Length == 1
+                        ? -1
+                        : int.Parse(
+                            ordinalParts[1],
+                            System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+    }
+
+    private sealed class GeneratedSymbolMap
+    {
+        public Dictionary<string, string> Replacements { get; } =
+            new(StringComparer.Ordinal);
+    }
+
+    [GeneratedRegex(
+        "\"(?:\\\\.|[^\"\\\\])*\"|string\\('(?:\\\\.|[^'\\\\])*'\\)|(?<prefix><>c__DisplayClass)(?<ordinal>\\d+(?:_\\d+)?)|(?<prefix><>f__AnonymousType)(?<ordinal>\\d+)|(?<prefix><[^>\\r\\n]+>b__)(?<ordinal>\\d+(?:_\\d+)?)|(?<prefix><[^>\\r\\n]+>d__)(?<ordinal>\\d+)|(?<prefix><>9__)(?<ordinal>\\d+(?:_\\d+)?)|(?<prefix><>8__locals|<>[A-Za-z][A-Za-z0-9]*__)(?<ordinal>\\d+)|(?<prefix><[^>\\r\\n]+>g__[^|\\r\\n']+\\|)(?<ordinal>\\d+_\\d+)",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+    private static partial Regex GeneratedOrdinalRegex();
 
     private static string NormalizeFingerprint(string content)
     {
@@ -688,14 +1010,15 @@ public sealed class Decompiler
         }
     }
 
-    private static (
+    private static async Task<(
         IReadOnlyList<StaticDataHash> Hashes,
-        DecompilationError? Error) GetStaticDataHashes(
+        DecompilationError? Error)> GetStaticDataHashesAsync(
         PEFile pe,
         CancellationToken ct)
     {
         var entries = new List<StaticDataEntry>();
         DecompilationError? error = null;
+        var inspectedFields = 0;
         foreach (var handle in pe.Metadata.GetTopLevelTypeDefinitions())
         {
             var definition = pe.Metadata.GetTypeDefinition(handle);
@@ -703,6 +1026,10 @@ public sealed class Decompiler
 
             foreach (var fieldHandle in definition.GetFields())
             {
+                if (++inspectedFields % 128 == 0)
+                {
+                    await Task.Yield();
+                }
                 ct.ThrowIfCancellationRequested();
                 var field = pe.Metadata.GetFieldDefinition(fieldHandle);
                 if ((field.Attributes & System.Reflection.FieldAttributes.HasFieldRVA) == 0)
@@ -738,16 +1065,54 @@ public sealed class Decompiler
                 }
             }
         }
-        var hashes = new List<StaticDataHash>(entries.Count);
-        foreach (var entry in entries)
+
+        var overlaps = entries.ToDictionary(
+            entry => entry,
+            _ => new List<StaticDataEntry>());
+        var active = new List<StaticDataEntry>();
+        var orderedEntries = entries
+            .OrderBy(entry => entry.Rva)
+            .ThenBy(entry => entry.Bytes.Length)
+            .ThenBy(entry => entry.DeclaringType, StringComparer.Ordinal)
+            .ThenBy(entry => entry.FieldName, StringComparer.Ordinal)
+            .ToArray();
+        for (var index = 0; index < orderedEntries.Length; index++)
         {
-            var relationships = entries
-                .Where(other => other != entry
-                    && RangesOverlap(
-                        entry.Rva,
-                        entry.Bytes.Length,
+            if (index > 0 && index % 128 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var current = orderedEntries[index];
+            active.RemoveAll(other =>
+                (long)other.Rva + other.Bytes.Length <= current.Rva);
+            foreach (var other in active)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!RangesOverlap(
+                        current.Rva,
+                        current.Bytes.Length,
                         other.Rva,
                         other.Bytes.Length))
+                {
+                    continue;
+                }
+                overlaps[current].Add(other);
+                overlaps[other].Add(current);
+            }
+            active.Add(current);
+        }
+
+        var hashes = new List<StaticDataHash>(entries.Count);
+        for (var index = 0; index < entries.Count; index++)
+        {
+            if (index > 0 && index % 128 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var entry = entries[index];
+            var relationships = overlaps[entry]
                 .OrderBy(other => other.DeclaringType, StringComparer.Ordinal)
                 .ThenBy(other => other.FieldName, StringComparer.Ordinal)
                 .Select(other =>
@@ -773,7 +1138,8 @@ public sealed class Decompiler
                && (long)secondStart < (long)firstStart + firstLength;
     }
 
-    private static IReadOnlyDictionary<string, string> GetPrivateImplementationMemberHashes(
+    private static async Task<IReadOnlyDictionary<string, string>>
+        GetPrivateImplementationMemberHashesAsync(
         PEFile pe,
         PackageAssemblyResolver resolver,
         IReadOnlyList<StaticDataHash> staticDataHashes,
@@ -781,6 +1147,7 @@ public sealed class Decompiler
         CancellationToken ct)
     {
         var members = new List<PrivateMemberContent>();
+        var inspectedMembers = 0;
         foreach (var handle in pe.Metadata.GetTopLevelTypeDefinitions())
         {
             var definition = pe.Metadata.GetTypeDefinition(handle);
@@ -793,6 +1160,10 @@ public sealed class Decompiler
             var typeMembers = new List<PrivateMemberContent>();
             foreach (var method in definition.GetMethods())
             {
+                if (++inspectedMembers % 64 == 0)
+                {
+                    await Task.Yield();
+                }
                 ct.ThrowIfCancellationRequested();
                 using var writer = new StringWriter();
                 var disassembler = CreateDisassembler(writer);
@@ -804,6 +1175,10 @@ public sealed class Decompiler
             }
             foreach (var fieldHandle in definition.GetFields())
             {
+                if (++inspectedMembers % 64 == 0)
+                {
+                    await Task.Yield();
+                }
                 ct.ThrowIfCancellationRequested();
                 var field = pe.Metadata.GetFieldDefinition(fieldHandle);
                 if ((field.Attributes & System.Reflection.FieldAttributes.HasFieldRVA) == 0)
@@ -835,43 +1210,72 @@ public sealed class Decompiler
             }
         }
 
-        var byKey = members.ToDictionary(
+        var membersByKey = members.ToDictionary(
             member => member.Key,
             member => member,
             StringComparer.Ordinal);
-        var qualifiedHashes = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var member in members)
+        var dependencies = new IReadOnlyList<int>[members.Count];
+        for (var index = 0; index < members.Count; index++)
         {
-            var closure = new HashSet<string>(StringComparer.Ordinal);
-            var pending = new Stack<string>();
-            pending.Push(member.Key);
+            if (index > 0 && index % 32 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var referenced = new List<int>();
+            for (var candidateIndex = 0; candidateIndex < members.Count; candidateIndex++)
+            {
+                if (candidateIndex == index)
+                {
+                    continue;
+                }
+                var candidate = members[candidateIndex];
+                if (ReferencesQualifiedMember(
+                        members[index].Content,
+                        candidate.DeclaringType,
+                        candidate.MemberName))
+                {
+                    referenced.Add(candidateIndex);
+                }
+            }
+            dependencies[index] = referenced;
+        }
+
+        var qualifiedHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var index = 0; index < members.Count; index++)
+        {
+            if (index > 0 && index % 32 == 0)
+            {
+                await Task.Yield();
+            }
+            ct.ThrowIfCancellationRequested();
+            var closure = new HashSet<int>();
+            var pending = new Stack<int>();
+            pending.Push(index);
             while (pending.TryPop(out var current))
             {
+                ct.ThrowIfCancellationRequested();
                 if (!closure.Add(current))
                 {
                     continue;
                 }
-                foreach (var dependency in members.Where(dependency =>
-                             dependency.Key != current
-                             && ReferencesQualifiedMember(
-                                 byKey[current].Content,
-                                 dependency.DeclaringType,
-                                 dependency.MemberName)))
+                foreach (var dependency in dependencies[current])
                 {
-                    pending.Push(dependency.Key);
+                    pending.Push(dependency);
                 }
             }
             var closureContent = string.Join(
                 "\n",
                 closure
-                    .OrderBy(item => item, StringComparer.Ordinal)
-                    .Select(item => $"// Private member {item}\n{byKey[item].Content}"));
-            qualifiedHashes[member.Key] = HashUtil.Sha256Hex(
+                    .Select(item => members[item])
+                    .OrderBy(item => item.Key, StringComparer.Ordinal)
+                    .Select(item => $"// Private member {item.Key}\n{item.Content}"));
+            qualifiedHashes[members[index].Key] = HashUtil.Sha256Hex(
                 System.Text.Encoding.UTF8.GetBytes(closureContent));
         }
         return qualifiedHashes
             .GroupBy(
-                pair => byKey[pair.Key].MemberName,
+                pair => membersByKey[pair.Key].MemberName,
                 StringComparer.Ordinal)
             .ToDictionary(
                 group => group.Key,
@@ -919,96 +1323,6 @@ public sealed class Decompiler
                 memberName,
                 content);
         }
-    }
-
-    private static IReadOnlyDictionary<string, string> GetHiddenHelperHashes(
-        PEFile pe,
-        PackageAssemblyResolver resolver,
-        IReadOnlyList<StaticDataHash> staticDataHashes,
-        IReadOnlyDictionary<string, string> privateImplementationMemberHashes,
-        string moduleHash,
-        CancellationToken ct)
-    {
-        var rawByName = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var handle in pe.Metadata.GetTopLevelTypeDefinitions())
-        {
-            ct.ThrowIfCancellationRequested();
-            var definition = pe.Metadata.GetTypeDefinition(handle);
-            var name = pe.Metadata.GetString(definition.Name);
-            if (!IsHiddenHelperTypeName(name)
-                || IsPrivateImplementationTypeName(name))
-            {
-                continue;
-            }
-
-            using var writer = new StringWriter();
-            var disassembler = new ReflectionDisassembler(
-                new PlainTextOutput(writer),
-                ct)
-            {
-                AssemblyResolver = resolver,
-                DetectControlStructure = false,
-                ExpandMemberDefinitions = true,
-                ShowMetadataTokens = false,
-                ShowRawRVAOffsetAndBytes = false,
-            };
-            disassembler.DisassembleType(pe, handle);
-            rawByName[name] = NormalizeFingerprint(writer.ToString());
-        }
-        var baseContent = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var (name, rawContent) in rawByName)
-        {
-            var content = rawContent;
-            content = AppendAssemblyReferenceIdentities(
-                content,
-                pe,
-                moduleHash);
-            foreach (var staticData in staticDataHashes
-                         .Where(item => ReferencesStaticData(content, item))
-                         .OrderBy(item => item.DeclaringType, StringComparer.Ordinal)
-                         .ThenBy(item => item.FieldName, StringComparer.Ordinal))
-            {
-                content += $"\n// Static data {staticData.DeclaringType}::{staticData.FieldName}: {staticData.Hash}";
-            }
-            foreach (var (memberName, hash) in privateImplementationMemberHashes
-                         .Where(pair => ReferencesMember(content, pair.Key))
-                         .OrderBy(pair => pair.Key, StringComparer.Ordinal))
-            {
-                content += $"\n// Private member {memberName}: {hash}";
-            }
-            baseContent[name] = content;
-        }
-
-        var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var name in baseContent.Keys)
-        {
-            var closure = new HashSet<string>(StringComparer.Ordinal);
-            var pending = new Stack<string>();
-            pending.Push(name);
-            while (pending.TryPop(out var current))
-            {
-                if (!closure.Add(current))
-                {
-                    continue;
-                }
-                foreach (var dependency in baseContent.Keys.Where(dependency =>
-                             dependency != current
-                             && baseContent[current].Contains(
-                                 dependency,
-                                 StringComparison.Ordinal)))
-                {
-                    pending.Push(dependency);
-                }
-            }
-            var closureContent = string.Join(
-                "\n",
-                closure
-                    .OrderBy(item => item, StringComparer.Ordinal)
-                    .Select(item => $"// Hidden helper {item}\n{baseContent[item]}"));
-            hashes[name] = HashUtil.Sha256Hex(
-                System.Text.Encoding.UTF8.GetBytes(closureContent));
-        }
-        return hashes;
     }
 
     private static string AppendAssemblyReferenceIdentities(
@@ -1060,85 +1374,59 @@ public sealed class Decompiler
                     && line.Contains(" at ", StringComparison.Ordinal)));
     }
 
-    private static bool HasDisassemblyDiagnostic(string fingerprint)
+    private static bool ReferencesMember(string content, string memberName)
     {
-        var allText = fingerprint.ToLowerInvariant();
-        if (allText.Contains("<bad", StringComparison.Ordinal)
-            || allText.Contains("<err:", StringComparison.Ordinal)
-            || allText.Contains("wrong signature", StringComparison.Ordinal)
-            || allText.Contains("bad signature", StringComparison.Ordinal)
-            || allText.Contains("invalid local", StringComparison.Ordinal)
-            || allText.Contains("invalid typecode", StringComparison.Ordinal)
-            || allText.Contains("invalid method", StringComparison.Ordinal)
-            || allText.Contains("could not decode", StringComparison.Ordinal)
-            || allText.Contains("not enough space", StringComparison.Ordinal)
-            || allText.Contains("out of bounds", StringComparison.Ordinal)
-            || allText.Contains("unexpected end", StringComparison.Ordinal)
-            || allText.Contains("bad image", StringComparison.Ordinal))
+        if (ContainsOutsideProtectedLiteral(content, $"::'{memberName}'"))
         {
             return true;
         }
 
-        foreach (var line in fingerprint.Split('\n'))
+        var marker = "::" + memberName;
+        var start = 0;
+        while (start < content.Length)
         {
-            for (var index = 0; index <= line.Length - 14; index++)
+            var index = content.IndexOf(marker, start, StringComparison.Ordinal);
+            if (index < 0)
             {
-                if (!line.AsSpan(index, 3).SequenceEqual("/* ")
-                    || !line.AsSpan(index + 11, 3).SequenceEqual(" */"))
-                {
-                    continue;
-                }
-                var token = line.AsSpan(index + 3, 8);
-                if (token.ToString().All(Uri.IsHexDigit))
-                {
-                    return true;
-                }
+                return false;
             }
 
-            var trimmed = line.TrimStart();
-            if (!trimmed.StartsWith("//", StringComparison.Ordinal)
-                && !trimmed.StartsWith("/*", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (trimmed.StartsWith("/* ", StringComparison.Ordinal)
-                && trimmed.EndsWith(" */", StringComparison.Ordinal))
-            {
-                var token = trimmed.AsSpan(3, trimmed.Length - 6);
-                if (token.Length == 8
-                    && token.ToString().All(Uri.IsHexDigit))
-                {
-                    return true;
-                }
-            }
-
-            var diagnostic = trimmed.ToLowerInvariant();
-            if (diagnostic.Contains("invalid", StringComparison.Ordinal)
-                || diagnostic.Contains("could not", StringComparison.Ordinal)
-                || diagnostic.Contains("not enough", StringComparison.Ordinal)
-                || diagnostic.Contains("out of bounds", StringComparison.Ordinal)
-                || diagnostic.Contains("unexpected", StringComparison.Ordinal)
-                || diagnostic.Contains("bad ", StringComparison.Ordinal)
-                || diagnostic.Contains("<bad", StringComparison.Ordinal)
-                || diagnostic.Contains("<err:", StringComparison.Ordinal))
+            var end = index + marker.Length;
+            if ((end == content.Length || !IsIdentifierCharacter(content[end]))
+                && !IsInsideProtectedLiteral(content, index))
             {
                 return true;
             }
+            start = index + 1;
         }
         return false;
     }
 
-    private static bool ReferencesMember(string content, string memberName)
-        => content.Contains($"::{memberName}", StringComparison.Ordinal)
-           || content.Contains($"::'{memberName}'", StringComparison.Ordinal);
+    private static bool ContainsOutsideProtectedLiteral(string content, string value)
+    {
+        var start = 0;
+        while (start < content.Length)
+        {
+            var index = content.IndexOf(value, start, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                return false;
+            }
+            if (!IsInsideProtectedLiteral(content, index))
+            {
+                return true;
+            }
+            start = index + 1;
+        }
+        return false;
+    }
 
     private static bool ReferencesQualifiedMember(
         string content,
         string declaringType,
         string memberName)
         => ReferencesMember(content, memberName)
-           && content.Contains(declaringType, StringComparison.Ordinal);
+           && ContainsExactIdentifier(content, declaringType);
 
     private static bool ReferencesStaticData(
         string content,
@@ -1147,6 +1435,93 @@ public sealed class Decompiler
             content,
             staticData.DeclaringType,
             staticData.FieldName);
+
+    private static bool ReferencesType(
+        string content,
+        string reflectionName,
+        string simpleName)
+        => ContainsExactIdentifier(content, reflectionName)
+           || ContainsExactIdentifier(content, simpleName);
+
+    private static bool ContainsExactIdentifier(string content, string identifier)
+    {
+        var start = 0;
+        while (start < content.Length)
+        {
+            var index = content.IndexOf(identifier, start, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            var end = index + identifier.Length;
+            var hasLeftBoundary = index == 0 || !IsIdentifierCharacter(content[index - 1]);
+            var hasRightBoundary = end == content.Length || !IsIdentifierCharacter(content[end]);
+            if (hasLeftBoundary
+                && hasRightBoundary
+                && !IsInsideProtectedLiteral(content, index))
+            {
+                return true;
+            }
+            start = index + 1;
+        }
+        return false;
+
+    }
+
+    private static bool IsIdentifierCharacter(char value)
+        => char.IsLetterOrDigit(value)
+           || value is '_' or '.' or '/' or '`' or '<' or '>' or '$';
+
+    private static bool IsInsideProtectedLiteral(string content, int position)
+    {
+        var lineStart = content.LastIndexOf('\n', Math.Max(0, position - 1)) + 1;
+        var inDoubleQuotedString = false;
+        var inSecurityString = false;
+        var escaped = false;
+        for (var index = lineStart; index < position; index++)
+        {
+            var value = content[index];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+            if (value == '\\' && (inDoubleQuotedString || inSecurityString))
+            {
+                escaped = true;
+                continue;
+            }
+            if (inDoubleQuotedString)
+            {
+                if (value == '"')
+                {
+                    inDoubleQuotedString = false;
+                }
+                continue;
+            }
+            if (inSecurityString)
+            {
+                if (value == '\'')
+                {
+                    inSecurityString = false;
+                }
+                continue;
+            }
+            if (value == '"')
+            {
+                inDoubleQuotedString = true;
+            }
+            else if (content.AsSpan(index).StartsWith(
+                         "string('",
+                         StringComparison.Ordinal))
+            {
+                inSecurityString = true;
+                index += "string('".Length - 1;
+            }
+        }
+        return inDoubleQuotedString || inSecurityString;
+    }
 
     private static bool IsPrivateImplementationTypeName(string name)
         => name.Contains("<PrivateImplementationDetails>", StringComparison.Ordinal);
@@ -1240,6 +1615,17 @@ public sealed class Decompiler
         string DeclaringType,
         string MemberName,
         string Content);
+
+    private sealed record HiddenHelperFingerprint(
+        string SimpleName,
+        string ReflectionName,
+        string ContentHash);
+
+    private sealed record HiddenHelperContent(
+        string SimpleName,
+        string ReflectionName,
+        string RawContent,
+        string ContentHash);
 
     private OneOf<(PEFile pe, PackageAssemblyResolver resolver, byte[] bytes), DecompilationError> LoadAssembly(
         PackageReader package, string path)

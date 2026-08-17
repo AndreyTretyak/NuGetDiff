@@ -206,17 +206,8 @@ public sealed class DiffPageTests : TestContext
                 StringComparison.Ordinal));
         coreNode.Click();
         cut.WaitForAssertion(
-            () => Assert.Contains(
-                "Filtering unchanged types",
-                cut.Markup,
-                StringComparison.Ordinal),
+            () => Assert.NotEmpty(cut.FindAll(".file-link.is-type")),
             TimeSpan.FromSeconds(10));
-        cut.WaitForAssertion(
-            () => Assert.DoesNotContain(
-                "Filtering unchanged types",
-                cut.Markup,
-                StringComparison.Ordinal),
-            TimeSpan.FromSeconds(20));
 
         filter.Change(true);
 
@@ -228,21 +219,22 @@ public sealed class DiffPageTests : TestContext
     public async Task Expansion_shows_types_before_exact_filtering_finishes()
     {
         var source = new BlockingExactAnalysisSource();
-        var assembly = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var oldAssembly = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var newAssembly = ChangePeTimestamp(oldAssembly);
         source.Add(
             Id,
             OldVersion,
             BuildPackageWithAssembly(
                 OldVersion,
-                "lib/net8.0/Old.dll",
-                assembly));
+                "lib/net8.0/Test.Package.dll",
+                oldAssembly));
         source.Add(
             Id,
             NewVersion,
             BuildPackageWithAssembly(
                 NewVersion,
-                "lib/net8.0/New.dll",
-                assembly));
+                "lib/net8.0/Test.Package.dll",
+                newAssembly));
         RegisterServices(source);
         var cut = RenderComparison();
         var assemblyName = cut.WaitForElement(
@@ -273,21 +265,22 @@ public sealed class DiffPageTests : TestContext
     public void Exact_filter_failure_keeps_provisional_types_and_error_visible()
     {
         var source = new FailingExactAnalysisSource();
-        var assembly = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var oldAssembly = TestPackageBuilder.LoadCoreAssemblyBytes();
+        var newAssembly = ChangePeTimestamp(oldAssembly);
         source.Add(
             Id,
             OldVersion,
             BuildPackageWithAssembly(
                 OldVersion,
-                "lib/net8.0/Old.dll",
-                assembly));
+                "lib/net8.0/Test.Package.dll",
+                oldAssembly));
         source.Add(
             Id,
             NewVersion,
             BuildPackageWithAssembly(
                 NewVersion,
-                "lib/net8.0/New.dll",
-                assembly));
+                "lib/net8.0/Test.Package.dll",
+                newAssembly));
         RegisterServices(source);
         var cut = RenderComparison();
 
@@ -401,6 +394,14 @@ public sealed class DiffPageTests : TestContext
             Id,
             version,
             new[] { new TestPackageBuilder.FileSpec(path, assembly) });
+
+    private static byte[] ChangePeTimestamp(byte[] assembly)
+    {
+        var changed = (byte[])assembly.Clone();
+        var peHeaderOffset = BitConverter.ToInt32(changed, 0x3c);
+        changed[peHeaderOffset + 8] ^= 1;
+        return changed;
+    }
 
     private static IReadOnlyList<string> FileNames(IRenderedFragment cut)
         => cut.FindAll(".file-link .name")

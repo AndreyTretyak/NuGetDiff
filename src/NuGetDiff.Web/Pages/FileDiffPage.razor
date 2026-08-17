@@ -302,12 +302,7 @@
     }
 
     private bool ShouldIncludeFile(FileChange change)
-        => change.Kind != FileChangeKind.Unchanged
-           || (_loadedTypeChanges.TryGetValue(change.Path, out var typeChanges)
-               && typeChanges.Any(typeChange =>
-                   typeChange.Kind != FileChangeKind.Unchanged))
-           || _listedTypeChanges.ContainsKey(change.Path)
-           || _failedTypeLoads.ContainsKey(change.Path);
+        => change.Kind != FileChangeKind.Unchanged;
 
     private string ResolveTreePath(string path)
     {

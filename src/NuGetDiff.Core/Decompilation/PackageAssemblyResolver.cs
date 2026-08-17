@@ -21,6 +21,7 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
     private readonly Dictionary<string, PEFile> _byReference = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, List<string>> _pathsByName = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _unresolved = new();
+    private readonly HashSet<string> _unresolvedReferences = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<string> UnresolvedReferences => _unresolved;
 
@@ -49,6 +50,10 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
         {
             return cached;
         }
+        if (_unresolvedReferences.Contains(reference.FullName))
+        {
+            return null;
+        }
 
         if (TryLoadInFolder(_baseFolder, reference, out var pe))
         {
@@ -71,6 +76,7 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
         {
             _unresolved.Add(reference.Name);
         }
+        _unresolvedReferences.Add(reference.FullName);
         return null;
     }
 
@@ -162,5 +168,6 @@ public sealed class PackageAssemblyResolver : IAssemblyResolver, IDisposable
         }
         _byPath.Clear();
         _byReference.Clear();
+        _unresolvedReferences.Clear();
     }
 }

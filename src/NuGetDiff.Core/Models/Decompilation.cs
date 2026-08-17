@@ -19,10 +19,10 @@ public sealed record TypeDecompilation(
 
 public sealed record TypeFingerprint(
     string ReflectionName,
-    string? Content,
+    string? ContentHash,
     DecompilationError? Error)
 {
-    public bool IsSuccess => Content is not null;
+    public bool IsSuccess => ContentHash is not null;
 }
 
 

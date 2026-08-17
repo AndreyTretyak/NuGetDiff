@@ -179,6 +179,7 @@ public sealed class PackageComparisonServiceTests
         Assert.All(
             result.Changes!,
             change => Assert.Equal(FileChangeKind.Unchanged, change.Kind));
+        Assert.Equal(4, source.OpenCount);
     }
 
     [Fact]
