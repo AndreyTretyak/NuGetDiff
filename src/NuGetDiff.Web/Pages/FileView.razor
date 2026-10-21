@@ -7,6 +7,7 @@
 @using Microsoft.JSInterop
 @inherits CancellablePageBase
 @inject PackageResolver Resolver
+@inject PackageAnalysisService Analysis
 @inject BusyState Busy
 @inject MarkdownRenderer Markdown
 @inject NavigationManager Nav
@@ -27,6 +28,7 @@
         @if (_tree is not null)
         {
             <FileTree Node="_tree" OnFileClick="OnFileClick"
+                      OnAssemblyExpand="OnAssemblyExpand"
                       SelectedPath="@Path" SelectedType="@Type" />
         }
         else if (_error is not null)
@@ -60,11 +62,11 @@
         }
         else if (_kind == FileKind.Markdown && _text is not null && string.IsNullOrEmpty(Type))
         {
-            <article class="markdown-body">@((MarkupString)Markdown.ToHtml(_text))</article>
+            <article class="markdown-body" @key="_highlightGeneration">@((MarkupString)Markdown.ToHtml(_text))</article>
         }
         else if ((_kind == FileKind.Text || _kind == FileKind.Markdown) && _text is not null)
         {
-            <pre class="code-view"><code class="@CodeLanguageClass">@_text</code></pre>
+            <pre class="code-view" @key="_highlightGeneration"><code class="@CodeLanguageClass">@_text</code></pre>
         }
         else if (_kind == FileKind.Assembly)
         {
@@ -94,7 +96,7 @@
                         <ul>@foreach (var w in _decompilation.Warnings) { <li>@w</li> }</ul>
                     </details>
                 }
-                <pre class="code-view"><code class="language-csharp">@_decompilation.CSharp</code></pre>
+                <pre class="code-view" @key="_highlightGeneration"><code class="language-csharp">@_decompilation.CSharp</code></pre>
             }
             else if (_decompError is not null)
             {
@@ -123,6 +125,7 @@
     private string? _lengthDescription;
     private FileTreeNode? _tree;
     private bool _shouldHighlight;
+    private int _highlightGeneration;
     private IReadOnlyList<TypeSummary>? _types;
 
     // Cap the size of content we hand to Prism so very large generated files
@@ -172,7 +175,7 @@
             return;
         }
 
-        using var _ = Busy.Begin($"Loading {Path}…");
+        using var busyScope = Busy.Begin($"Loading {Path}…");
         try
         {
             await using var stream = await Resolver.OpenOnlineAsync(Id, Version, ct);
@@ -182,13 +185,7 @@
 
             if (keyChanged || _tree is null)
             {
-                var decomp = new Decompiler();
-                Func<FileEntry, IReadOnlyList<TypeSummary>> typesFor = entry =>
-                {
-                    var r = decomp.ListTypes(reader, entry.Path);
-                    return r.IsOk ? r.Ok! : Array.Empty<TypeSummary>();
-                };
-                _tree = FileTreeBuilder.Build(reader.Files, typesFor);
+                _tree = FileTreeBuilder.Build(reader.Files);
                 _treeKey = key;
                 StateHasChanged();
             }
@@ -211,26 +208,34 @@
             }
             else if (_kind == FileKind.Assembly)
             {
-                var decomp = new Decompiler();
                 if (!string.IsNullOrEmpty(Type))
                 {
                     Busy.Update($"Decompiling {Type}…");
                     await Task.Yield();
                     if (ct.IsCancellationRequested) return;
-                    var result = decomp.DecompileTypeFromPackage(reader, Path, Type);
+                    var result = await Analysis.DecompileOnlineTypeAsync(Id, Version, Path, Type, ct);
                     if (ct.IsCancellationRequested) return;
-                    if (result.IsOk) _decompilation = result.Ok;
-                    else _decompError = result.Err;
+                    if (result.IsSuccess) _decompilation = result.Result;
+                    else _decompError = result.Error;
                 }
                 else
                 {
-                    // No specific type requested: list types so the user can pick
-                    // one. We deliberately do NOT decompile the whole module here —
-                    // that's exactly the "one giant file" behaviour we replaced.
-                    var listed = decomp.ListTypes(reader, Path);
+                    var listed = await Analysis.LoadOnlineTypesAsync(Id, Version, Path, ct);
                     if (ct.IsCancellationRequested) return;
-                    if (listed.IsOk) _types = listed.Ok;
-                    else _decompError = listed.Err;
+                    if (listed.IsSuccess) _types = listed.Types;
+                    else _decompError = listed.Error;
+                }
+
+                CompleteLoadingState();
+                busyScope.Dispose();
+                StateHasChanged();
+                var selectedAssembly = _tree is null
+                    ? null
+                    : FileTreeBuilder.FindFileNode(_tree, Path);
+                if (selectedAssembly is { TypeLoadState: AssemblyTypeLoadState.NotLoaded })
+                {
+                    selectedAssembly.IsExpanded = true;
+                    await LoadAssemblyTypesAsync(selectedAssembly, ct);
                 }
             }
         }
@@ -247,32 +252,90 @@
         {
             if (!ct.IsCancellationRequested)
             {
-                _loading = false;
-                var contentLength = _text?.Length ?? _decompilation?.CSharp?.Length ?? 0;
-                var hasLanguage = !string.IsNullOrEmpty(LanguageDetector.FromPath(Path));
-                _shouldHighlight =
-                    contentLength > 0
-                    && contentLength <= MaxHighlightChars
-                    && (
-                        (_kind == FileKind.Markdown && _text is not null && string.IsNullOrEmpty(Type)) // README code fences
-                        || (_kind == FileKind.Text && _text is not null && hasLanguage)                 // .cs/.json/etc.
-                        || (_kind == FileKind.Assembly && _decompilation is not null)                   // decompiled C#
-                    );
+                CompleteLoadingState();
             }
         }
     }
 
-    // Re-highlight after every render: Razor may rewrite <code>'s text content
-    // on a re-render that re-evaluates the markup, which would discard Prism's
-    // spans. Prism.highlightAllUnder is idempotent because it tokenises from
-    // textContent.
+    private void CompleteLoadingState()
+    {
+        _loading = false;
+        var contentLength = _text?.Length ?? _decompilation?.CSharp?.Length ?? 0;
+        var hasLanguage = !string.IsNullOrEmpty(LanguageDetector.FromPath(Path));
+        _shouldHighlight =
+            contentLength > 0
+            && contentLength <= MaxHighlightChars
+            && (
+                (_kind == FileKind.Markdown && _text is not null && string.IsNullOrEmpty(Type))
+                || (_kind == FileKind.Text && _text is not null && hasLanguage)
+                || (_kind == FileKind.Assembly && _decompilation is not null)
+            );
+    }
+
+    private Task OnAssemblyExpand(FileTreeNode node)
+        => LoadAssemblyTypesAsync(node, CurrentCancellationToken);
+
+    private async Task LoadAssemblyTypesAsync(FileTreeNode node, CancellationToken ct)
+    {
+        if (!node.IsAssembly || node.TypeLoadState != AssemblyTypeLoadState.NotLoaded)
+        {
+            return;
+        }
+
+        node.TypeLoadState = AssemblyTypeLoadState.Loading;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Analysis.LoadOnlineTypesAsync(Id, Version, node.FullPath, ct);
+            if (ct.IsCancellationRequested)
+            {
+                node.TypeLoadState = AssemblyTypeLoadState.NotLoaded;
+                return;
+            }
+            if (!result.IsSuccess)
+            {
+                node.TypeLoadState = AssemblyTypeLoadState.Failed;
+                node.TypeLoadError = result.Error!.Message;
+                if (string.Equals(node.FullPath, Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    _decompError = result.Error;
+                }
+            }
+            else
+            {
+                FileTreeBuilder.PopulateAssemblyTypes(node, result.Types!);
+                if (string.Equals(node.FullPath, Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    _types = result.Types;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            node.TypeLoadState = AssemblyTypeLoadState.NotLoaded;
+            return;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or ArgumentException)
+        {
+            node.TypeLoadState = AssemblyTypeLoadState.Failed;
+            node.TypeLoadError = $"Failed to load types: {ex.Message}";
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // Highlight once for each newly loaded file. The generation marker lets the
+    // JS helper skip nodes already processed for the same content.
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (_shouldHighlight)
         {
             try
             {
-                await JS.InvokeVoidAsync("nuGetDiff.highlightAll", ".file-content");
+                await JS.InvokeVoidAsync(
+                    "nuGetDiff.highlightPending",
+                    ".file-content",
+                    _highlightGeneration);
+                _shouldHighlight = false;
             }
             catch (JSException)
             {
@@ -295,6 +358,7 @@
         _decompError = null;
         _lengthDescription = null;
         _shouldHighlight = false;
+        _highlightGeneration++;
         _types = null;
     }
 

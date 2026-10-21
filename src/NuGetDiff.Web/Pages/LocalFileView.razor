@@ -5,6 +5,7 @@
 @using NuGetDiff.Web.Services
 @inherits CancellablePageBase
 @inject PackageResolver Resolver
+@inject PackageAnalysisService Analysis
 @inject BusyState Busy
 @inject MarkdownRenderer Markdown
 @inject NavigationManager Nav
@@ -143,23 +144,22 @@ else if (_kind == FileKind.Binary)
             }
             else if (_kind == FileKind.Assembly)
             {
-                var decomp = new Decompiler();
                 if (!string.IsNullOrEmpty(Type))
                 {
                     Busy.Update($"Decompiling {Type}…");
                     await Task.Yield();
                     if (ct.IsCancellationRequested) return;
-                    var result = decomp.DecompileTypeFromPackage(reader, Path, Type);
+                    var result = await Analysis.DecompileLocalTypeAsync(Hash, Path, Type, ct);
                     if (ct.IsCancellationRequested) return;
-                    if (result.IsOk) _decompilation = result.Ok;
-                    else _decompError = result.Err;
+                    if (result.IsSuccess) _decompilation = result.Result;
+                    else _decompError = result.Error;
                 }
                 else
                 {
-                    var listed = decomp.ListTypes(reader, Path);
+                    var listed = await Analysis.LoadLocalTypesAsync(Hash, Path, ct);
                     if (ct.IsCancellationRequested) return;
-                    if (listed.IsOk) _types = listed.Ok;
-                    else _decompError = listed.Err;
+                    if (listed.IsSuccess) _types = listed.Types;
+                    else _decompError = listed.Error;
                 }
             }
         }

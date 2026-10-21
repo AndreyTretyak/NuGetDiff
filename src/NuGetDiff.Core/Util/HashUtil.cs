@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 
 namespace NuGetDiff.Core.Util;
 
@@ -10,6 +11,9 @@ public static class HashUtil
         SHA256.HashData(data, hash);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
+
+    public static string Sha256Hex(ReadOnlySpan<char> data)
+        => Sha256Hex(MemoryMarshal.AsBytes(data));
 
     public static string Sha256Hex(Stream stream)
     {

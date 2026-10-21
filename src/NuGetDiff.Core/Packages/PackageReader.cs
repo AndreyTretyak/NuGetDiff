@@ -2,6 +2,7 @@ using NuGet.Packaging;
 using NuGet.Versioning;
 using NuGetDiff.Core.Diffing;
 using NuGetDiff.Core.Models;
+using NuGetDiff.Core.Util;
 
 namespace NuGetDiff.Core.Packages;
 
@@ -10,6 +11,7 @@ public sealed class PackageReader : IDisposable
     private readonly PackageArchiveReader _reader;
     private NuspecMetadata? _metadata;
     private IReadOnlyList<FileEntry>? _files;
+    private Dictionary<string, FileEntry>? _filesByPath;
 
     public PackageReader(Stream nupkg, bool leaveOpen = false)
     {
@@ -41,7 +43,19 @@ public sealed class PackageReader : IDisposable
         return ms.ToArray();
     }
 
-    public bool ContainsFile(string path) => Files.Any(f => string.Equals(f.Path, path, StringComparison.OrdinalIgnoreCase));
+    public bool ContainsFile(string path) => FindFile(path) is not null;
+
+    public FileEntry? FindFile(string path)
+    {
+        _ = Files;
+        return _filesByPath!.GetValueOrDefault(path);
+    }
+
+    public string HashFile(string path)
+    {
+        using var stream = OpenFile(path);
+        return HashUtil.Sha256Hex(stream);
+    }
 
     private NuspecMetadata ReadMetadata()
     {
@@ -139,8 +153,7 @@ public sealed class PackageReader : IDisposable
             long length;
             try
             {
-                using var s = _reader.GetStream(path);
-                length = TryGetLength(s);
+                length = _reader.GetEntry(path).Length;
             }
             catch
             {
@@ -150,25 +163,16 @@ public sealed class PackageReader : IDisposable
             entries.Add(new FileEntry(path, length, FileClassifier.ClassifyByPath(path)));
         }
 
-        return entries
+        var files = entries
             .OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
             .ToList();
-    }
 
-    private static long TryGetLength(Stream s)
-    {
-        try { return s.Length; }
-        catch
+        _filesByPath = new Dictionary<string, FileEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in files)
         {
-            byte[] buf = new byte[8192];
-            long total = 0;
-            int n;
-            while ((n = s.Read(buf, 0, buf.Length)) > 0)
-            {
-                total += n;
-            }
-            return total;
+            _filesByPath.TryAdd(entry.Path, entry);
         }
+        return files;
     }
 
     public void Dispose() => _reader.Dispose();

@@ -1,41 +1,278 @@
 @using NuGetDiff.Core.Models
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
 
-<div class="diff-view">
-    <table class="diff-table">
-        <colgroup>
-            <col class="num-col" />
-            <col class="text-col" />
-            <col class="num-col" />
-            <col class="text-col" />
-        </colgroup>
-        <tbody>
-            @{
-                var oldLines = Diff.Old;
-                var newLines = Diff.New;
-                var rows = Math.Max(oldLines.Count, newLines.Count);
-            }
-            @for (var i = 0; i < rows; i++)
-            {
-                var o = i < oldLines.Count ? oldLines[i] : null;
-                var n = i < newLines.Count ? newLines[i] : null;
-                <tr>
-                    <td class="num">@(o?.OldNumber)</td>
-                    <td class="line @LineClass(o)">@RenderLine(o)</td>
-                    <td class="num">@(n?.NewNumber)</td>
-                    <td class="line @LineClass(n)">@RenderLine(n)</td>
-                </tr>
-            }
-        </tbody>
-    </table>
+<div class="diff-component">
+    <div class="diff-toolbar" aria-label="Diff display options">
+        <div class="diff-mode" role="group" aria-label="Diff layout">
+            <button type="button"
+                    class="@ModeClass(DiffDisplayMode.SideBySide)"
+                    aria-pressed="@AriaPressed(DiffDisplayMode.SideBySide)"
+                    @onclick="@(() => SetMode(DiffDisplayMode.SideBySide))">
+                Side by side
+            </button>
+            <button type="button"
+                    class="@ModeClass(DiffDisplayMode.Inline)"
+                    aria-pressed="@AriaPressed(DiffDisplayMode.Inline)"
+                    @onclick="@(() => SetMode(DiffDisplayMode.Inline))">
+                Inline
+            </button>
+        </div>
+        <label class="diff-option">
+            <input type="checkbox" aria-label="Wrap lines" @bind="WordWrap" />
+            Wrap lines
+        </label>
+    </div>
+
+    <div class="diff-view @(_wordWrap ? "wrap-lines" : "no-wrap")" @ref="_root">
+        @if (_mode == DiffDisplayMode.SideBySide)
+        {
+            <table class="diff-table diff-table-side-by-side" aria-label="Side-by-side file differences">
+                <thead>
+                    <tr>
+                        <th scope="col" class="num">Old line</th>
+                        <th scope="col">Old content</th>
+                        <th scope="col" class="num">New line</th>
+                        <th scope="col">New content</th>
+                    </tr>
+                </thead>
+                <colgroup>
+                    <col class="num-col" />
+                    <col class="text-col" />
+                    <col class="num-col" />
+                    <col class="text-col" />
+                </colgroup>
+                <tbody>
+                    @for (var i = 0; i < _visibleRows; i++)
+                    {
+                        var oldLine = i < Diff.Old.Count ? Diff.Old[i] : null;
+                        var newLine = i < Diff.New.Count ? Diff.New[i] : null;
+                        <tr>
+                            <td class="num">@(oldLine?.OldNumber)</td>
+                            <td class="line @LineClass(oldLine)"><span class="sr-only">@AccessibleLineLabel("Old", oldLine): </span><span class="diff-line-content">@RenderLine(oldLine)</span></td>
+                            <td class="num">@(newLine?.NewNumber)</td>
+                            <td class="line @LineClass(newLine)"><span class="sr-only">@AccessibleLineLabel("New", newLine): </span><span class="diff-line-content">@RenderLine(newLine)</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else
+        {
+            <table class="diff-table diff-table-inline" aria-label="Inline file differences">
+                <thead>
+                    <tr>
+                        <th scope="col" class="num">Old line</th>
+                        <th scope="col" class="num">New line</th>
+                        <th scope="col">Change</th>
+                        <th scope="col">Content</th>
+                    </tr>
+                </thead>
+                <colgroup>
+                    <col class="num-col" />
+                    <col class="num-col" />
+                    <col class="prefix-col" />
+                    <col class="inline-text-col" />
+                </colgroup>
+                <tbody>
+                    @for (var i = 0; i < _visibleRows; i++)
+                    {
+                        @foreach (var row in InlineRows(i))
+                        {
+                            <tr>
+                                <td class="num">@(row.OldNumber)</td>
+                                <td class="num">@(row.NewNumber)</td>
+                                <td class="prefix"><span class="sr-only">@ChangeLabel(row.Kind)</span><span aria-hidden="true">@row.Prefix</span></td>
+                                <td class="line @LineClass(row.Kind)"><span class="sr-only">@AccessibleInlineLabel(row.Kind): </span><span class="diff-line-content">@RenderLine(row.Line)</span></td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        }
+
+        @if (_visibleRows < _totalRows)
+        {
+            var remaining = _totalRows - _visibleRows;
+            var nextCount = Math.Min(ChunkSize, remaining);
+            <div class="diff-more">
+                <button type="button" @onclick="ShowMore">Show @nextCount more rows</button>
+                <span class="muted">Showing @_visibleRows of @_totalRows rows</span>
+            </div>
+        }
+    </div>
 </div>
 
 @code {
+    private const int ChunkSize = 500;
+    private const int ProgressiveThreshold = 500;
+    private const int MaxHighlightRows = 5000;
+    private const int MaxHighlightCharacters = 500_000;
+    private const int MaxSegmentsPerLine = 100;
+    private const int MaxVisibleSegments = 750;
+
     [Parameter, EditorRequired] public SideBySideDiff Diff { get; set; } = default!;
     [Parameter] public string? Language { get; set; }
 
-    private static string LineClass(DiffLine? line) => line?.Kind switch
+    private readonly HashSet<DiffLine> _detailedLines =
+        new(ReferenceEqualityComparer.Instance);
+    private ElementReference _root;
+    private SideBySideDiff? _renderedDiff;
+    private string? _renderedLanguage;
+    private DiffDisplayMode _mode;
+    private bool _wordWrap = true;
+    private int _visibleRows;
+    private int _totalRows;
+    private int _visibleCharacters;
+    private int _highlightGeneration;
+
+    private bool WordWrap
     {
-        null => string.Empty,
+        get => _wordWrap;
+        set => _wordWrap = value;
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(_renderedDiff, Diff)
+            || !string.Equals(_renderedLanguage, Language, StringComparison.Ordinal))
+        {
+            _renderedDiff = Diff;
+            _renderedLanguage = Language;
+            _totalRows = Math.Max(Diff.Old.Count, Diff.New.Count);
+            _visibleRows = _totalRows > ProgressiveThreshold
+                ? Math.Min(ChunkSize, _totalRows)
+                : _totalRows;
+            UpdateRenderBudget();
+            _highlightGeneration++;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (string.IsNullOrEmpty(Language)
+            || _visibleRows > MaxHighlightRows
+            || _visibleCharacters > MaxHighlightCharacters)
+        {
+            return;
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync(
+                "nuGetDiff.highlightPending",
+                _root,
+                _highlightGeneration);
+        }
+        catch (JSException)
+        {
+            // Syntax highlighting is an enhancement; raw text remains available.
+        }
+        catch (TaskCanceledException)
+        {
+            // Component disposed during navigation.
+        }
+    }
+
+    private void SetMode(DiffDisplayMode mode)
+    {
+        if (_mode == mode)
+        {
+            return;
+        }
+        _mode = mode;
+        _highlightGeneration++;
+    }
+
+    private void ShowMore()
+    {
+        _visibleRows = Math.Min(_visibleRows + ChunkSize, _totalRows);
+        UpdateRenderBudget();
+    }
+
+    private void UpdateRenderBudget()
+    {
+        _detailedLines.Clear();
+        _visibleCharacters = 0;
+        var remainingSegments = MaxVisibleSegments;
+        for (var index = 0; index < _visibleRows; index++)
+        {
+            AddLine(index < Diff.Old.Count ? Diff.Old[index] : null);
+            AddLine(index < Diff.New.Count ? Diff.New[index] : null);
+        }
+
+        void AddLine(DiffLine? line)
+        {
+            if (line is null || line.Kind == DiffLineKind.Imaginary)
+            {
+                return;
+            }
+
+            _visibleCharacters += line.Text.Length;
+            if (line.Segments is not { Count: > 0 }
+                || line.Segments.Count > MaxSegmentsPerLine
+                || line.Segments.Count > remainingSegments
+                || !line.Segments.Any(segment => segment.Kind != DiffSegmentKind.Equal))
+            {
+                return;
+            }
+
+            _detailedLines.Add(line);
+            remainingSegments -= line.Segments.Count;
+        }
+    }
+
+    private IEnumerable<InlineRow> InlineRows(int index)
+    {
+        var oldLine = index < Diff.Old.Count ? Diff.Old[index] : null;
+        var newLine = index < Diff.New.Count ? Diff.New[index] : null;
+        var hasOld = oldLine is not null && oldLine.Kind != DiffLineKind.Imaginary;
+        var hasNew = newLine is not null && newLine.Kind != DiffLineKind.Imaginary;
+
+        if (hasOld && hasNew
+            && oldLine!.Kind == DiffLineKind.Equal
+            && newLine!.Kind == DiffLineKind.Equal)
+        {
+            yield return new InlineRow(
+                oldLine.OldNumber,
+                newLine.NewNumber,
+                " ",
+                DiffLineKind.Equal,
+                oldLine);
+            yield break;
+        }
+
+        if (hasOld)
+        {
+            yield return new InlineRow(
+                oldLine!.OldNumber,
+                null,
+                "-",
+                DiffLineKind.Deleted,
+                oldLine);
+        }
+        if (hasNew)
+        {
+            yield return new InlineRow(
+                null,
+                newLine!.NewNumber,
+                "+",
+                DiffLineKind.Inserted,
+                newLine);
+        }
+    }
+
+    private string ModeClass(DiffDisplayMode mode)
+        => _mode == mode ? "active" : string.Empty;
+
+    private string AriaPressed(DiffDisplayMode mode)
+        => _mode == mode ? "true" : "false";
+
+    private static string LineClass(DiffLine? line)
+        => line is null ? string.Empty : LineClass(line.Kind);
+
+    private static string LineClass(DiffLineKind kind) => kind switch
+    {
         DiffLineKind.Imaginary => "imaginary",
         DiffLineKind.Inserted => "inserted",
         DiffLineKind.Deleted => "deleted",
@@ -43,11 +280,27 @@
         _ => string.Empty,
     };
 
+    private static string AccessibleLineLabel(string side, DiffLine? line)
+        => line is null || line.Kind == DiffLineKind.Imaginary
+            ? $"{side} content, no line"
+            : $"{side} content, {ChangeLabel(line.Kind)}";
+
+    private static string AccessibleInlineLabel(DiffLineKind kind)
+        => $"Content, {ChangeLabel(kind)}";
+
+    private static string ChangeLabel(DiffLineKind kind) => kind switch
+    {
+        DiffLineKind.Inserted => "inserted",
+        DiffLineKind.Deleted => "deleted",
+        DiffLineKind.Modified => "modified",
+        DiffLineKind.Imaginary => "no line",
+        _ => "unchanged",
+    };
+
     private RenderFragment RenderLine(DiffLine? line) => builder =>
     {
         if (line is null || line.Kind == DiffLineKind.Imaginary)
         {
-            // Non-breaking space keeps empty cells from collapsing visually.
             builder.AddMarkupContent(0, "\u00A0");
             return;
         }
@@ -56,16 +309,60 @@
             builder.AddMarkupContent(0, "\u00A0");
             return;
         }
-        if (!string.IsNullOrEmpty(Language))
+
+        if (line.Segments is { Count: > 0 } && _detailedLines.Contains(line))
         {
-            builder.OpenElement(1, "code");
-            builder.AddAttribute(2, "class", $"language-{Language}");
-            builder.AddContent(3, line.Text);
+            var sequence = 1;
+            builder.OpenElement(sequence++, "span");
+            builder.AddAttribute(sequence++, "class", "diff-code");
+            for (var segmentIndex = 0; segmentIndex < line.Segments.Count; segmentIndex++)
+            {
+                var segment = line.Segments[segmentIndex];
+                builder.OpenElement(
+                    sequence++,
+                    string.IsNullOrEmpty(Language) ? "span" : "code");
+                builder.SetKey($"{_highlightGeneration}:{segmentIndex}");
+                builder.AddAttribute(
+                    sequence++,
+                    "class",
+                    string.IsNullOrEmpty(Language)
+                        ? $"diff-segment {SegmentClass(segment.Kind)}"
+                        : $"language-{Language} diff-segment {SegmentClass(segment.Kind)}");
+                builder.AddContent(sequence++, segment.Text);
+                builder.CloseElement();
+            }
             builder.CloseElement();
+            return;
         }
-        else
-        {
-            builder.AddContent(4, line.Text);
-        }
+
+        builder.OpenElement(1, "code");
+        builder.SetKey(_highlightGeneration);
+        builder.AddAttribute(
+            2,
+            "class",
+            string.IsNullOrEmpty(Language) ? "diff-plain" : $"language-{Language}");
+        builder.AddContent(3, line.Text);
+        builder.CloseElement();
     };
+
+    private static string SegmentClass(DiffSegmentKind kind) => kind switch
+    {
+        DiffSegmentKind.Inserted => "diff-segment-inserted",
+        DiffSegmentKind.Deleted => "diff-segment-deleted",
+        DiffSegmentKind.Modified => "diff-segment-modified",
+        _ => "diff-segment-equal",
+    };
+
+    private enum DiffDisplayMode
+    {
+        SideBySide,
+        Inline,
+    }
+
+    private sealed record InlineRow(
+        int? OldNumber,
+        int? NewNumber,
+        string Prefix,
+        DiffLineKind Kind,
+        DiffLine Line);
 }

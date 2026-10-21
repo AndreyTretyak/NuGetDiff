@@ -1,7 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 
-namespace NuGetDiff.Core.Tests;
+namespace NuGetDiff.TestSupport;
 
 /// <summary>
 /// Builds in-memory .nupkg byte arrays for tests. .nupkg is just a zip with a .nuspec
@@ -90,11 +90,15 @@ internal static class TestPackageBuilder
     /// a real managed assembly without checking binaries into git.
     /// </summary>
     public static byte[] LoadCoreAssemblyBytes()
+        => LoadAssemblyBytes(typeof(NuGetDiff.Core.Models.PackageDescriptor));
+
+    public static byte[] LoadAssemblyBytes(Type markerType)
     {
-        var location = typeof(NuGetDiff.Core.Models.PackageDescriptor).Assembly.Location;
+        var location = markerType.Assembly.Location;
         if (string.IsNullOrEmpty(location))
         {
-            throw new InvalidOperationException("Could not locate NuGetDiff.Core.dll — Assembly.Location is empty.");
+            throw new InvalidOperationException(
+                $"Could not locate {markerType.Assembly.GetName().Name}.dll - Assembly.Location is empty.");
         }
         return File.ReadAllBytes(location);
     }

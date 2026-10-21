@@ -39,7 +39,7 @@ public sealed class UploadedPackageSource : IPackageSource
         var normVer = NuGetVersion.Parse(version).ToNormalizedString().ToLowerInvariant();
         if (_byIdVersion.TryGetValue((idLower, normVer), out var bytes))
         {
-            return Task.FromResult<Stream?>(new MemoryStream(bytes, writable: false));
+            return Task.FromResult<Stream?>(OpenBytes(bytes));
         }
         return Task.FromResult<Stream?>(null);
     }
@@ -48,7 +48,7 @@ public sealed class UploadedPackageSource : IPackageSource
     {
         if (_byHash.TryGetValue(contentHash, out var pkg))
         {
-            return Task.FromResult<Stream?>(new MemoryStream(pkg.Bytes, writable: false));
+            return Task.FromResult<Stream?>(OpenBytes(pkg.Bytes));
         }
         return Task.FromResult<Stream?>(null);
     }
@@ -57,4 +57,7 @@ public sealed class UploadedPackageSource : IPackageSource
         => _byHash.TryGetValue(contentHash, out var pkg) ? pkg : null;
 
     public IReadOnlyCollection<UploadedPackage> All => _byHash.Values.ToArray();
+
+    private static MemoryStream OpenBytes(byte[] bytes)
+        => new PackageBytesStream(bytes);
 }

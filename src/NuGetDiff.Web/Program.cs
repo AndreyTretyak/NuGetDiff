@@ -22,6 +22,9 @@ builder.Services.AddSingleton<IPackageSource>(sp =>
     new CachingPackageSource(sp.GetRequiredService<NuGetOrgPackageSource>(), sp.GetRequiredService<IPackageCache>()));
 
 builder.Services.AddSingleton<PackageResolver>();
+builder.Services.AddSingleton<PackageAnalysisCache>();
+builder.Services.AddSingleton<PackageAnalysisService>();
+builder.Services.AddSingleton<PackageComparisonService>();
 builder.Services.AddSingleton(sp =>
     new NuGetRegistrationClient(sp.GetRequiredService<HttpClient>()));
 

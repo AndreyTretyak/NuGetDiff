@@ -1,5 +1,6 @@
 using NuGet.Versioning;
 using NuGetDiff.Core.Packages;
+using NuGetDiff.Core.Util;
 using Xunit;
 
 namespace NuGetDiff.Core.Tests;
@@ -54,6 +55,36 @@ public class PackageSourceTests
         await using (var second = await caching.OpenAsync("X", "1.0.0")) { Assert.NotNull(second); }
 
         Assert.Equal(1, inner.CallCount);
+    }
+
+    [Fact]
+    public async Task Read_all_bytes_does_not_expose_a_public_memory_stream_buffer()
+    {
+        var bytes = new byte[] { 1, 2, 3, 4 };
+        await using var stream = new MemoryStream(
+            bytes,
+            0,
+            bytes.Length,
+            writable: false,
+            publiclyVisible: true);
+
+        var result = await HashUtil.ReadAllBytesAsync(stream);
+
+        Assert.NotSame(bytes, result);
+        Assert.Equal(bytes, result);
+    }
+
+    [Fact]
+    public async Task Cached_package_stream_does_not_expose_shared_bytes()
+    {
+        var caching = new CachingPackageSource(
+            new CountingSource(new byte[] { 9, 8, 7 }),
+            new InMemoryPackageCache());
+
+        await using var stream = await caching.OpenAsync("X", "1.0.0");
+
+        var memory = Assert.IsAssignableFrom<MemoryStream>(stream);
+        Assert.False(memory.TryGetBuffer(out _));
     }
 
     private static byte[] ToArray(Stream s)

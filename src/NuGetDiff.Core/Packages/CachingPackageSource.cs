@@ -22,17 +22,22 @@ public sealed class CachingPackageSource : IPackageSource
         var cached = await _cache.GetAsync(id, version, ct).ConfigureAwait(false);
         if (cached is not null)
         {
-            return new MemoryStream(cached, writable: false);
+            return OpenBytes(cached);
         }
 
-        var inner = await _inner.OpenAsync(id, version, ct).ConfigureAwait(false);
+        await using var inner = await _inner.OpenAsync(id, version, ct).ConfigureAwait(false);
         if (inner is null)
         {
             return null;
         }
 
-        var bytes = await HashUtil.ReadAllBytesAsync(inner, ct).ConfigureAwait(false);
+        var bytes = inner is PackageBytesStream packageStream
+            ? packageStream.Bytes
+            : await HashUtil.ReadAllBytesAsync(inner, ct).ConfigureAwait(false);
         await _cache.PutAsync(id, version, bytes, ct).ConfigureAwait(false);
-        return new MemoryStream(bytes, writable: false);
+        return OpenBytes(bytes);
     }
+
+    private static MemoryStream OpenBytes(byte[] bytes)
+        => new PackageBytesStream(bytes);
 }

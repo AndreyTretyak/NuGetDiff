@@ -15,3 +15,28 @@ window.nuGetDiff.highlightAll = function (selector) {
         window.Prism.highlightAll();
     }
 };
+
+window.nuGetDiff.highlightPending = function (selectorOrElement, generation) {
+    if (!window.Prism) return;
+
+    let scope = document;
+    if (selectorOrElement) {
+        const el = (typeof selectorOrElement === 'string')
+            ? document.querySelector(selectorOrElement)
+            : selectorOrElement;
+        if (el) scope = el;
+    }
+
+    const marker = String(generation);
+    const nodes = [];
+    if (scope.matches?.('code[class*="language-"]')) {
+        nodes.push(scope);
+    }
+    nodes.push(...scope.querySelectorAll('code[class*="language-"]'));
+
+    for (const node of nodes) {
+        if (node.dataset.nugetdiffHighlightGeneration === marker) continue;
+        window.Prism.highlightElement(node);
+        node.dataset.nugetdiffHighlightGeneration = marker;
+    }
+};

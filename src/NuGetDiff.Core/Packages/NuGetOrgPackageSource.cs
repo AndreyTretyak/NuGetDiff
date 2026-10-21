@@ -35,7 +35,7 @@ public sealed class NuGetOrgPackageSource : IPackageSource
         }
         response.EnsureSuccessStatusCode();
         var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        return new MemoryStream(bytes, writable: false);
+        return new PackageBytesStream(bytes);
     }
 
     public Uri BuildPackageUrl(string id, string version)

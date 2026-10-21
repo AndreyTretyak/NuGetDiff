@@ -24,7 +24,10 @@ public sealed class Differ
     /// identical content via SHA256; files that exist on only one side are matched by
     /// SHA256 across the rest of the tree (rename detection).
     /// </summary>
-    public TreeDiff DiffTree(PackageReader oldPkg, PackageReader newPkg)
+    public TreeDiff DiffTree(
+        PackageReader oldPkg,
+        PackageReader newPkg,
+        CancellationToken ct = default)
     {
         var oldByPath = oldPkg.Files.ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
         var newByPath = newPkg.Files.ToDictionary(f => f.Path, StringComparer.OrdinalIgnoreCase);
@@ -38,18 +41,26 @@ public sealed class Differ
 
         foreach (var (path, newEntry) in newByPath)
         {
+            ct.ThrowIfCancellationRequested();
             if (oldByPath.TryGetValue(path, out var oldEntry))
             {
                 seenInOld.Add(path);
-                var oh = HashOf(oldPkg, path, oldHashes);
-                var nh = HashOf(newPkg, path, newHashes);
-                if (string.Equals(oh, nh, StringComparison.Ordinal))
+                if (oldEntry.Length >= 0
+                    && newEntry.Length >= 0
+                    && oldEntry.Length != newEntry.Length)
                 {
-                    changes.Add(new FileChange(FileChangeKind.Unchanged, oldEntry, newEntry));
+                    changes.Add(new FileChange(FileChangeKind.Modified, oldEntry, newEntry));
                 }
                 else
                 {
-                    changes.Add(new FileChange(FileChangeKind.Modified, oldEntry, newEntry));
+                    var oh = HashOf(oldPkg, path, oldHashes);
+                    var nh = HashOf(newPkg, path, newHashes);
+                    changes.Add(new FileChange(
+                        string.Equals(oh, nh, StringComparison.Ordinal)
+                            ? FileChangeKind.Unchanged
+                            : FileChangeKind.Modified,
+                        oldEntry,
+                        newEntry));
                 }
             }
             else
@@ -60,6 +71,7 @@ public sealed class Differ
 
         foreach (var (path, oldEntry) in oldByPath)
         {
+            ct.ThrowIfCancellationRequested();
             if (!seenInOld.Contains(path))
             {
                 changes.Add(new FileChange(FileChangeKind.Removed, oldEntry, null));
@@ -71,26 +83,50 @@ public sealed class Differ
         var removed = changes.Where(c => c.Kind == FileChangeKind.Removed).ToList();
         if (added.Count > 0 && removed.Count > 0)
         {
-            // Compute hashes only for the candidate set.
-            foreach (var a in added)
-            {
-                _ = HashOf(newPkg, a.New!.Path, newHashes);
-            }
-            foreach (var r in removed)
-            {
-                _ = HashOf(oldPkg, r.Old!.Path, oldHashes);
-            }
+            var unmatchedRemoved = new HashSet<FileChange>(removed);
+            var removedByLength = removed
+                .Where(change => change.Old!.Length >= 0)
+                .GroupBy(change => change.Old!.Length)
+                .ToDictionary(group => group.Key, group => group.ToList());
+            var removedWithUnknownLength = removed
+                .Where(change => change.Old!.Length < 0)
+                .ToList();
 
-            var removedByHash = removed.ToLookup(r => oldHashes[r.Old!.Path], StringComparer.Ordinal);
-            foreach (var a in added)
+            foreach (var addedChange in added)
             {
-                var hash = newHashes[a.New!.Path];
-                var match = removedByHash[hash].FirstOrDefault();
+                ct.ThrowIfCancellationRequested();
+                IEnumerable<FileChange> candidates;
+                if (addedChange.New!.Length >= 0)
+                {
+                    removedByLength.TryGetValue(addedChange.New.Length, out var sameLength);
+                    candidates = (sameLength ?? Enumerable.Empty<FileChange>())
+                        .Concat(removedWithUnknownLength);
+                }
+                else
+                {
+                    candidates = unmatchedRemoved;
+                }
+
+                var availableCandidates = candidates
+                    .Where(unmatchedRemoved.Contains)
+                    .ToList();
+                if (availableCandidates.Count == 0)
+                {
+                    continue;
+                }
+
+                var addedHash = HashOf(newPkg, addedChange.New.Path, newHashes);
+                var match = availableCandidates.FirstOrDefault(candidate =>
+                    string.Equals(
+                        HashOf(oldPkg, candidate.Old!.Path, oldHashes),
+                        addedHash,
+                        StringComparison.Ordinal));
                 if (match is not null)
                 {
-                    changes.Remove(a);
+                    unmatchedRemoved.Remove(match);
+                    changes.Remove(addedChange);
                     changes.Remove(match);
-                    changes.Add(new FileChange(FileChangeKind.Renamed, match.Old, a.New));
+                    changes.Add(new FileChange(FileChangeKind.Renamed, match.Old, addedChange.New));
                 }
             }
         }
@@ -106,26 +142,38 @@ public sealed class Differ
     /// classifier: text → DiffPlex; assembly → decompile both and DiffPlex on the C#;
     /// binary → size + hash comparison only.
     /// </summary>
-    public FileDiff DiffFile(PackageReader oldPkg, PackageReader newPkg, string path)
+    public FileDiff DiffFile(
+        PackageReader oldPkg,
+        PackageReader newPkg,
+        string path,
+        CancellationToken ct = default)
+        => DiffFile(oldPkg, newPkg, path, path, ct);
+
+    public FileDiff DiffFile(
+        PackageReader oldPkg,
+        PackageReader newPkg,
+        string oldPath,
+        string newPath,
+        CancellationToken ct = default)
     {
-        var oldExists = oldPkg.ContainsFile(path);
-        var newExists = newPkg.ContainsFile(path);
+        var oldEntry = oldPkg.FindFile(oldPath);
+        var newEntry = newPkg.FindFile(newPath);
+        var oldExists = oldEntry is not null;
+        var newExists = newEntry is not null;
         if (!oldExists && !newExists)
         {
             return new FileDiff(FileDiffKind.Unsupported, null, null, null, null, null, "File not found in either version.");
         }
 
-        var oldEntry = oldExists ? oldPkg.Files.First(f => string.Equals(f.Path, path, StringComparison.OrdinalIgnoreCase)) : null;
-        var newEntry = newExists ? newPkg.Files.First(f => string.Equals(f.Path, path, StringComparison.OrdinalIgnoreCase)) : null;
         var kind = (newEntry?.Kind ?? oldEntry?.Kind ?? FileKind.Binary);
-
-        var oldBytes = oldExists ? oldPkg.ReadFileBytes(path) : Array.Empty<byte>();
-        var newBytes = newExists ? newPkg.ReadFileBytes(path) : Array.Empty<byte>();
-        var oldHash = oldExists ? HashUtil.Sha256Hex(oldBytes) : null;
-        var newHash = newExists ? HashUtil.Sha256Hex(newBytes) : null;
 
         if (kind == FileKind.Text || kind == FileKind.Markdown)
         {
+            ct.ThrowIfCancellationRequested();
+            var oldBytes = oldExists ? oldPkg.ReadFileBytes(oldPath) : Array.Empty<byte>();
+            var newBytes = newExists ? newPkg.ReadFileBytes(newPath) : Array.Empty<byte>();
+            var oldHash = oldExists ? HashUtil.Sha256Hex(oldBytes) : null;
+            var newHash = newExists ? HashUtil.Sha256Hex(newBytes) : null;
             var oldText = oldExists ? DecodeText(oldBytes) : string.Empty;
             var newText = newExists ? DecodeText(newBytes) : string.Empty;
             var sbs = BuildSideBySide(oldText, newText);
@@ -134,19 +182,23 @@ public sealed class Differ
 
         if (kind == FileKind.Assembly)
         {
+            var oldHash = oldExists ? oldPkg.HashFile(oldPath) : null;
+            var newHash = newExists ? newPkg.HashFile(newPath) : null;
             string? oldCs = null;
             string? newCs = null;
             string? message = null;
 
             if (oldExists)
             {
-                var r = _decompiler.DecompileFromPackage(oldPkg, path);
+                ct.ThrowIfCancellationRequested();
+                var r = _decompiler.DecompileFromPackage(oldPkg, oldPath);
                 if (r.IsOk) { oldCs = r.Ok!.CSharp; }
                 else { message = "Old: " + r.Err!.Message; }
             }
             if (newExists)
             {
-                var r = _decompiler.DecompileFromPackage(newPkg, path);
+                ct.ThrowIfCancellationRequested();
+                var r = _decompiler.DecompileFromPackage(newPkg, newPath);
                 if (r.IsOk) { newCs = r.Ok!.CSharp; }
                 else { message = ((message is null) ? "New: " : message + " | New: ") + r.Err!.Message; }
             }
@@ -165,12 +217,15 @@ public sealed class Differ
         }
 
         // Binary: just report sizes + hashes; no inline diff.
+        ct.ThrowIfCancellationRequested();
+        var oldBinaryHash = oldExists ? oldPkg.HashFile(oldPath) : null;
+        var newBinaryHash = newExists ? newPkg.HashFile(newPath) : null;
         return new FileDiff(
             FileDiffKind.Binary,
             null,
-            oldHash, newHash,
+            oldBinaryHash, newBinaryHash,
             oldEntry?.Length, newEntry?.Length,
-            string.Equals(oldHash, newHash, StringComparison.Ordinal) ? "Identical." : "Binary differs.");
+            string.Equals(oldBinaryHash, newBinaryHash, StringComparison.Ordinal) ? "Identical." : "Binary differs.");
     }
 
     /// <summary>
@@ -178,18 +233,37 @@ public sealed class Differ
     /// may be missing (returns the present side as text-only) or fail to decompile (returns
     /// a <see cref="FileDiffKind.Assembly"/> diff with a populated <c>Message</c>).
     /// </summary>
-    public FileDiff DiffType(PackageReader oldPkg, PackageReader newPkg, string assemblyPath, string typeReflectionName)
+    public FileDiff DiffType(
+        PackageReader oldPkg,
+        PackageReader newPkg,
+        string assemblyPath,
+        string typeReflectionName,
+        CancellationToken ct = default)
+        => DiffType(
+            oldPkg,
+            newPkg,
+            assemblyPath,
+            assemblyPath,
+            typeReflectionName,
+            ct);
+
+    public FileDiff DiffType(
+        PackageReader oldPkg,
+        PackageReader newPkg,
+        string oldAssemblyPath,
+        string newAssemblyPath,
+        string typeReflectionName,
+        CancellationToken ct = default)
     {
-        var oldExists = oldPkg.ContainsFile(assemblyPath);
-        var newExists = newPkg.ContainsFile(assemblyPath);
+        var oldEntry = oldPkg.FindFile(oldAssemblyPath);
+        var newEntry = newPkg.FindFile(newAssemblyPath);
+        var oldExists = oldEntry is not null;
+        var newExists = newEntry is not null;
         if (!oldExists && !newExists)
         {
             return new FileDiff(FileDiffKind.Unsupported, null, null, null, null, null,
-                $"Assembly '{assemblyPath}' not found in either version.");
+                $"Assembly '{newAssemblyPath}' not found in either version.");
         }
-
-        var oldEntry = oldExists ? oldPkg.Files.First(f => string.Equals(f.Path, assemblyPath, StringComparison.OrdinalIgnoreCase)) : null;
-        var newEntry = newExists ? newPkg.Files.First(f => string.Equals(f.Path, assemblyPath, StringComparison.OrdinalIgnoreCase)) : null;
 
         string? oldCs = null;
         string? newCs = null;
@@ -197,26 +271,64 @@ public sealed class Differ
 
         if (oldExists)
         {
-            var r = _decompiler.DecompileTypeFromPackage(oldPkg, assemblyPath, typeReflectionName);
+            ct.ThrowIfCancellationRequested();
+            var r = _decompiler.DecompileTypeFromPackage(
+                oldPkg,
+                oldAssemblyPath,
+                typeReflectionName,
+                ct);
             if (r.IsOk) { oldCs = r.Ok!.CSharp; }
             else { message = "Old: " + r.Err!.Message; }
         }
         if (newExists)
         {
-            var r = _decompiler.DecompileTypeFromPackage(newPkg, assemblyPath, typeReflectionName);
+            ct.ThrowIfCancellationRequested();
+            var r = _decompiler.DecompileTypeFromPackage(
+                newPkg,
+                newAssemblyPath,
+                typeReflectionName,
+                ct);
             if (r.IsOk) { newCs = r.Ok!.CSharp; }
             else { message = ((message is null) ? "New: " : message + " | New: ") + r.Err!.Message; }
         }
 
-        if (oldCs is null && newCs is null)
+        return DiffDecompiledType(
+            typeReflectionName,
+            oldCs,
+            newCs,
+            oldEntry?.Length,
+            newEntry?.Length,
+            message);
+    }
+
+    public FileDiff DiffDecompiledType(
+        string typeReflectionName,
+        string? oldCSharp,
+        string? newCSharp,
+        long? oldLength,
+        long? newLength,
+        string? message = null)
+    {
+        if (oldCSharp is null && newCSharp is null)
         {
             return new FileDiff(
-                FileDiffKind.Assembly, null, null, null, oldEntry?.Length, newEntry?.Length,
+                FileDiffKind.Assembly, null, null, null, oldLength, newLength,
                 message ?? $"Could not decompile '{typeReflectionName}' on either side.");
         }
 
-        var sbs = BuildSideBySide(oldCs ?? string.Empty, newCs ?? string.Empty);
-        return new FileDiff(FileDiffKind.Assembly, sbs, null, null, oldEntry?.Length, newEntry?.Length, message);
+        var sbs = BuildSideBySide(oldCSharp ?? string.Empty, newCSharp ?? string.Empty);
+        if (message is null && !HasChanges(sbs))
+        {
+            message = $"No C# source differences in '{typeReflectionName}'. Metadata or IL may still differ.";
+        }
+        return new FileDiff(
+            FileDiffKind.Assembly,
+            sbs,
+            null,
+            null,
+            oldLength,
+            newLength,
+            message);
     }
 
     private SideBySideDiff BuildSideBySide(string oldText, string newText)
@@ -244,10 +356,42 @@ public sealed class Differ
                 OldNumber: p.Position,
                 NewNumber: p.Position,
                 Kind: kind,
-                Text: p.Text ?? string.Empty));
+                Text: p.Text ?? string.Empty,
+                Segments: ConvertSegments(p.SubPieces)));
         }
         return result;
     }
+
+    private static IReadOnlyList<DiffSegment>? ConvertSegments(IReadOnlyList<DiffPiece> pieces)
+    {
+        if (pieces.Count == 0)
+        {
+            return null;
+        }
+
+        var segments = new List<DiffSegment>(pieces.Count);
+        foreach (var piece in pieces)
+        {
+            if (piece.Type == ChangeType.Imaginary)
+            {
+                continue;
+            }
+
+            var kind = piece.Type switch
+            {
+                ChangeType.Inserted => DiffSegmentKind.Inserted,
+                ChangeType.Deleted => DiffSegmentKind.Deleted,
+                ChangeType.Modified => DiffSegmentKind.Modified,
+                _ => DiffSegmentKind.Equal,
+            };
+            segments.Add(new DiffSegment(kind, piece.Text ?? string.Empty));
+        }
+        return segments.Count == 0 ? null : segments;
+    }
+
+    private static bool HasChanges(SideBySideDiff diff)
+        => diff.Old.Any(line => line.Kind != DiffLineKind.Equal)
+           || diff.New.Any(line => line.Kind != DiffLineKind.Equal);
 
     private static string DecodeText(byte[] bytes)
     {
@@ -281,8 +425,7 @@ public sealed class Differ
         {
             return h;
         }
-        var bytes = pkg.ReadFileBytes(path);
-        h = HashUtil.Sha256Hex(bytes);
+        h = pkg.HashFile(path);
         cache[path] = h;
         return h;
     }
